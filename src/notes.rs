@@ -1,8 +1,8 @@
 use crate::cryphase::Kdf;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -79,16 +79,10 @@ pub fn load_path(path: &Path) -> io::Result<String> {
             "Choose a .json note file.",
         ));
     }
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "The note must be a regular file.",
-        ));
-    }
     // Bound reads even when a file grows after its metadata is inspected.
-    const LIMIT: u64 = 16 * 1024 * 1024;
+    const LIMIT: u64 = crate::limits::MAX_JSON_BYTES as u64;
     let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    fs::File::open(path)?
+    crate::secure_fs::open_read(path)?
         .take(LIMIT + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > LIMIT {
@@ -145,6 +139,12 @@ fn json_filename(name: &str) -> io::Result<String> {
 
 pub fn save(directory: &Path, name: &str, ciphertext: &str, kdf: Kdf) -> io::Result<PathBuf> {
     let filename = json_filename(name)?;
+    if ciphertext.len() > crate::limits::MAX_BASE64_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Ciphertext exceeds the supported size limit.",
+        ));
+    }
     // Only canonical Base64 and fixed metadata enter JSON, so no user text can inject fields.
     let bytes = BASE64.decode(ciphertext).map_err(io::Error::other)?;
     let id = kdf as u8;
@@ -169,27 +169,43 @@ pub fn save(directory: &Path, name: &str, ciphertext: &str, kdf: Kdf) -> io::Res
     let json = format!(
         "{{\n  \"schema\": \"seedcrypt-note\",\n  \"schema_version\": 1,\n  \"payload_version\": {payload_version},\n  \"cipher\": \"AES-256-GCM\",\n  \"encoding\": \"base64\",\n  \"kdf\": {kdf_json},\n  \"ciphertext\": \"{ciphertext}\"\n}}\n"
     );
-    fs::create_dir_all(directory)?;
-    let path = directory.join(filename);
-    // Refuse overwrites, including existing symlinks, rather than silently losing a note.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    if let Err(error) = file
-        .write_all(json.as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = fs::remove_file(&path);
-        return Err(error);
+    if json.len() > crate::limits::MAX_JSON_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Note exceeds the JSON read limit.",
+        ));
     }
+    let path = directory.join(filename);
+    crate::secure_fs::write_new(&path, json.as_bytes())?;
     Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_supported_note_is_readable_and_larger_input_is_rejected() {
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("seedcrypt-size-{:x}", u128::from_le_bytes(random)));
+        let bytes = vec![42; crate::limits::MAX_CONTENT_BYTES];
+        let ciphertext = crate::cryphase::encrypt_bytes(&bytes, b"password", Kdf::Pbkdf2).unwrap();
+        assert!(ciphertext.len() <= crate::limits::MAX_BASE64_BYTES);
+        let path = save(&directory, "maximum", &ciphertext, Kdf::Pbkdf2).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() <= crate::limits::MAX_JSON_BYTES as u64);
+        let loaded = load(&directory, "maximum").unwrap();
+        assert_eq!(
+            &*crate::cryphase::decrypt_bytes(&loaded, b"password").unwrap(),
+            &bytes
+        );
+        let oversized = "A".repeat(crate::limits::MAX_BASE64_BYTES + 1);
+        assert!(save(&directory, "oversized", &oversized, Kdf::Pbkdf2).is_err());
+        assert!(!directory.join("oversized.json").exists());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn dropped_paths_handle_spaces_and_quotes_without_shell_execution() {

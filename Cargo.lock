@@ -500,10 +500,12 @@ dependencies = [
  "crossterm",
  "getrandom",
  "ghash",
+ "libc",
  "pbkdf2",
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys",
  "zeroize",
 ]
 

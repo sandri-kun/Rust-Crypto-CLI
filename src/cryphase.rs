@@ -69,10 +69,17 @@ pub fn encrypt_file_container(
     encrypt_versioned(plaintext, password, kdf, 2)
 }
 
-pub fn is_file_container(ciphertext: &str) -> bool {
-    BASE64
-        .decode(ciphertext)
-        .is_ok_and(|bytes| bytes.starts_with(b"SEEDCRYPT\x02"))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadKind {
+    Legacy,
+    Raw,
+    NamedFile,
+}
+
+/// Metadata is assigned only after successful authentication of the matching format.
+pub struct DecryptedPayload {
+    pub bytes: Zeroizing<Vec<u8>>,
+    pub kind: PayloadKind,
 }
 
 fn encrypt_versioned(
@@ -83,6 +90,9 @@ fn encrypt_versioned(
 ) -> Result<String, String> {
     if password.is_empty() {
         return Err("[error] Password cannot be empty.".to_string());
+    }
+    if plaintext.len() > crate::limits::MAX_CONTENT_BYTES {
+        return Err("Content exceeds the supported size limit.".to_string());
     }
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 12];
@@ -129,17 +139,28 @@ fn decrypt_payload(
 }
 
 pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
-    let plaintext = decrypt_bytes(encrypted_base64, password)?;
-    if is_file_container(encrypted_base64) {
+    let plaintext = decrypt_authenticated(encrypted_base64, password)?;
+    if plaintext.kind == PayloadKind::NamedFile {
         return Err("This note contains a file. Use menu 8 to restore it.".to_string());
     }
-    SecretText::from_bytes(plaintext)
+    SecretText::from_bytes(plaintext.bytes)
 }
 
+#[cfg(test)]
 pub fn decrypt_bytes(
     encrypted_base64: &str,
     password: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, String> {
+    Ok(decrypt_authenticated(encrypted_base64, password)?.bytes)
+}
+
+pub fn decrypt_authenticated(
+    encrypted_base64: &str,
+    password: &[u8],
+) -> Result<DecryptedPayload, String> {
+    if encrypted_base64.len() > crate::limits::MAX_BASE64_BYTES {
+        return Err("Ciphertext exceeds the supported size limit.".to_string());
+    }
     let payload = BASE64
         .decode(encrypted_base64)
         .map_err(|_| "Invalid Base64 data.")?;
@@ -158,12 +179,22 @@ pub fn decrypt_bytes(
                 &payload[..header_len],
             )
         {
-            return Ok(text);
+            return Ok(DecryptedPayload {
+                bytes: text,
+                kind: if payload[MAGIC.len()] == 2 {
+                    PayloadKind::NamedFile
+                } else {
+                    PayloadKind::Raw
+                },
+            });
         }
     }
     // Legacy salts are arbitrary bytes, including possible matches with MAGIC.
     // A fallback can only succeed if the legacy GCM authentication tag verifies.
-    decrypt_payload(&payload, password, Kdf::Pbkdf2, &[])
+    Ok(DecryptedPayload {
+        bytes: decrypt_payload(&payload, password, Kdf::Pbkdf2, &[])?,
+        kind: PayloadKind::Legacy,
+    })
 }
 
 #[cfg(test)]
@@ -242,19 +273,33 @@ mod tests {
 
     #[test]
     fn legacy_including_marker_collision() {
-        for id in [0, 1, 2, 255] {
-            let mut salt = [0u8; 16];
-            salt[..MAGIC.len()].copy_from_slice(MAGIC);
-            salt[MAGIC.len()] = VERSION;
-            salt[MAGIC.len() + 1] = id;
-            assert_eq!(
-                decrypt(&legacy(b"old secret", salt), b"password")
-                    .unwrap()
-                    .as_str(),
-                "old secret"
-            );
+        for version in [1, 2] {
+            for id in [0, 1, 2, 255] {
+                let mut salt = [0u8; 16];
+                salt[..MAGIC.len()].copy_from_slice(MAGIC);
+                salt[MAGIC.len()] = version;
+                salt[MAGIC.len() + 1] = id;
+                assert_eq!(
+                    decrypt(&legacy(b"old secret", salt), b"password")
+                        .unwrap()
+                        .as_str(),
+                    "old secret"
+                );
+                let authenticated =
+                    decrypt_authenticated(&legacy(b"old secret", salt), b"password").unwrap();
+                assert_eq!(authenticated.kind, PayloadKind::Legacy);
+                assert_eq!(&*authenticated.bytes, b"old secret");
+            }
         }
         assert!(decrypt(&legacy(&[255], [0; 16]), b"password").is_err());
+    }
+
+    #[test]
+    fn oversized_content_rejected_before_key_derivation() {
+        let bytes = vec![0; crate::limits::MAX_CONTENT_BYTES + 1];
+        assert!(encrypt_bytes(&bytes, b"password", Kdf::Argon2id).is_err());
+        let encoded = "A".repeat(crate::limits::MAX_BASE64_BYTES + 1);
+        assert!(decrypt_authenticated(&encoded, b"password").is_err());
     }
 
     #[test]

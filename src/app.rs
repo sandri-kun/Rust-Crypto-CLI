@@ -8,7 +8,7 @@ use crossterm::{
         enable_raw_mode, is_raw_mode_enabled,
     },
 };
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use zeroize::{Zeroize, Zeroizing};
 
 struct PasswordTerminal {
@@ -24,6 +24,10 @@ impl Drop for PasswordTerminal {
 }
 
 fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
+    secret_line(prompt, true, crate::limits::MAX_PASSWORD_BYTES)
+}
+
+fn secret_line(prompt: &str, masked: bool, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
     let restore = !is_raw_mode_enabled()?;
     enable_raw_mode()?;
     let terminal = PasswordTerminal { restore };
@@ -72,6 +76,12 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
+                if password.len() + character.len_utf8() > limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Input exceeds the supported size limit. Operation cancelled.",
+                    ));
+                }
                 // Grow into a guarded allocation so the previous allocation is wiped.
                 if password.len() + character.len_utf8() > password.capacity() {
                     let mut larger = Zeroizing::new(Vec::with_capacity(password.capacity() * 2));
@@ -80,8 +90,13 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
                 }
                 let mut encoded = Zeroizing::new([0u8; 4]);
                 password.extend_from_slice(character.encode_utf8(&mut *encoded).as_bytes());
+                let rendered = if masked {
+                    write!(output, "*")
+                } else {
+                    write!(output, "{character}")
+                };
                 character.zeroize();
-                write!(output, "*")?;
+                rendered?;
             }
             _ => {}
         }
@@ -93,6 +108,12 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
 }
 
 pub fn run() {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        eprintln!(
+            "[error] An interactive terminal is required. Redirected input/output is not supported."
+        );
+        return;
+    }
     loop {
         println!("\n  SEEDCRYPT  v{}", env!("CARGO_PKG_VERSION"));
         println!("  Private notes / Local encryption");
@@ -107,18 +128,13 @@ pub fn run() {
         println!();
         println!("  [3] Exit");
         println!("  ----------------------------------------");
-        print!("  Select an option: ");
-        io::stdout().flush().unwrap();
-
-        let mut choice = String::new();
-        match io::stdin().read_line(&mut choice) {
-            Ok(0) => break,
-            Ok(_) => {}
+        let choice = match public_prompt("  Select an option: ") {
+            Ok(choice) => choice,
             Err(error) => {
                 eprintln!("[error] Could not read input: {error}");
                 break;
             }
-        }
+        };
         let choice = choice.trim();
 
         match choice {
@@ -138,15 +154,24 @@ pub fn run() {
     }
 }
 
+fn public_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
+    let mut bytes = secret_line(prompt, false, crate::limits::MAX_BASE64_BYTES)?;
+    // Move the allocation; all typed characters were encoded as UTF-8 by secret_line.
+    Ok(Zeroizing::new(
+        String::from_utf8(std::mem::take(&mut *bytes))
+            .expect("terminal input contains valid UTF-8"),
+    ))
+}
+
 fn input_prompt(prompt: &str) -> Zeroizing<String> {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut input = Zeroizing::new(String::new());
-    io::stdin().read_line(&mut input).unwrap();
-    while input.ends_with(['\r', '\n']) {
-        input.pop();
+    match public_prompt(prompt) {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[error] {error}");
+            // Invalid sentinel prevents an input error selecting an empty-input default.
+            Zeroizing::new("\0".to_string())
+        }
     }
-    input
 }
 
 fn run_with_loading<F, R>(loading_message: &str, task: F) -> R
@@ -466,27 +491,8 @@ fn secret_input() -> io::Result<Zeroizing<Vec<u8>>> {
     let mut text = Zeroizing::new(Vec::with_capacity(128));
     let mut first = true;
     loop {
-        let line = if masked {
-            password_prompt("  Secret text: ")?
-        } else {
-            print!("  > ");
-            io::stdout().flush()?;
-            let mut line = Zeroizing::new(String::new());
-            if io::stdin().read_line(&mut line)? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Input ended. Operation cancelled.",
-                ));
-            }
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
-            Zeroizing::new(line.as_bytes().to_vec())
-        };
-        if finish_input_line(&mut text, &mut first, &line, multiline) {
+        let line = secret_line("  Secret text: ", masked, crate::limits::MAX_INPUT_BYTES)?;
+        if finish_input_line(&mut text, &mut first, &line, multiline)? {
             break;
         }
     }
@@ -519,7 +525,7 @@ fn reencrypt_menu() {
         }
     };
     let result = run_with_loading("  Authenticating note", || {
-        cryphase::decrypt_bytes(&ciphertext, &old_password)
+        cryphase::decrypt_authenticated(&ciphertext, &old_password)
     });
     drop(old_password);
     let plaintext = match result {
@@ -538,10 +544,14 @@ fn reencrypt_menu() {
     };
     println!("  The new note will use Argon2id (64 MiB, 3 iterations).");
     let result = run_with_loading("  Re-encrypting", || {
-        if cryphase::is_file_container(&ciphertext) {
-            cryphase::encrypt_file_container(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+        if plaintext.kind == cryphase::PayloadKind::NamedFile {
+            cryphase::encrypt_file_container(
+                &plaintext.bytes,
+                &new_password,
+                cryphase::Kdf::Argon2id,
+            )
         } else {
-            cryphase::encrypt_bytes(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+            cryphase::encrypt_bytes(&plaintext.bytes, &new_password, cryphase::Kdf::Argon2id)
         }
     });
     drop(plaintext);
@@ -561,9 +571,25 @@ fn finish_input_line(
     first: &mut bool,
     line: &[u8],
     multiline: bool,
-) -> bool {
+) -> io::Result<bool> {
     if multiline && line == b".end" {
-        return true;
+        return Ok(true);
+    }
+    let added = if multiline && line == b"..end" {
+        4
+    } else {
+        line.len()
+    };
+    if text
+        .len()
+        .saturating_add(added)
+        .saturating_add(usize::from(!*first))
+        > crate::limits::MAX_INPUT_BYTES
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Text exceeds the 8 MiB limit. Operation cancelled.",
+        ));
     }
     if !*first {
         append_secret(text, b"\n");
@@ -577,7 +603,7 @@ fn finish_input_line(
         },
     );
     *first = false;
-    !multiline
+    Ok(!multiline)
 }
 
 fn file_menu(encrypting: bool) {
@@ -681,7 +707,7 @@ fn file_menu(encrypting: bool) {
             }
         };
         let result = run_with_loading("  Decrypting file", || {
-            cryphase::decrypt_bytes(&ciphertext, &password)
+            cryphase::decrypt_authenticated(&ciphertext, &password)
         });
         drop(password);
         let plaintext = match result {
@@ -691,8 +717,8 @@ fn file_menu(encrypting: bool) {
                 return;
             }
         };
-        let (original_name, file_bytes) = if cryphase::is_file_container(&ciphertext) {
-            match crate::files::unpack(&plaintext) {
+        let (original_name, file_bytes) = if plaintext.kind == cryphase::PayloadKind::NamedFile {
+            match crate::files::unpack(&plaintext.bytes) {
                 Ok((name, bytes)) => (Some(name), bytes),
                 Err(error) => {
                     println!("[error] {error}");
@@ -700,7 +726,7 @@ fn file_menu(encrypting: bool) {
                 }
             }
         } else {
-            (None, plaintext.as_slice())
+            (None, plaintext.bytes.as_slice())
         };
         println!("[info] Export writes unencrypted data to decrypted_files/.");
         println!("  Type /cancel to cancel. Existing files are never overwritten.");
@@ -742,21 +768,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multiline_limit_includes_separator_and_does_not_append_partial_input() {
+        let mut bytes = Zeroizing::new(vec![b'x'; crate::limits::MAX_INPUT_BYTES]);
+        let mut first = false;
+        assert!(finish_input_line(&mut bytes, &mut first, b"more", true).is_err());
+        assert_eq!(bytes.len(), crate::limits::MAX_INPUT_BYTES);
+        assert!(finish_input_line(&mut bytes, &mut first, b".end", true).unwrap());
+    }
+
+    #[test]
     fn multiline_preserves_spaces_blank_lines_and_escaped_terminator() {
         let mut text = Zeroizing::new(Vec::new());
         let mut first = true;
         for line in ["  first  ", "", "??", "..end", ""] {
-            assert!(!finish_input_line(
-                &mut text,
-                &mut first,
-                line.as_bytes(),
-                true
-            ));
+            assert!(!finish_input_line(&mut text, &mut first, line.as_bytes(), true).unwrap());
         }
-        assert!(finish_input_line(&mut text, &mut first, b".end", true));
+        assert!(finish_input_line(&mut text, &mut first, b".end", true).unwrap());
         assert_eq!(&*text, "  first  \n\n??\n.end\n".as_bytes());
         let mut single = Zeroizing::new(Vec::new());
-        assert!(finish_input_line(&mut single, &mut true, b".end", false));
+        assert!(finish_input_line(&mut single, &mut true, b".end", false).unwrap());
         assert_eq!(&*single, b".end");
     }
 }

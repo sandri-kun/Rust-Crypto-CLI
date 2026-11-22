@@ -1,21 +1,14 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
-pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_FILE_BYTES: usize = crate::limits::MAX_INPUT_BYTES;
 
 pub fn read_source(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    if !fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Choose a regular file.",
-        ));
-    }
-    let file = fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_FILE_BYTES as u64 {
+    let file = crate::secure_fs::open_read(path)?;
+    if file.len()? > MAX_FILE_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "File exceeds the 8 MiB limit.",
@@ -95,22 +88,8 @@ pub fn unpack(bytes: &[u8]) -> io::Result<(&str, &[u8])> {
 
 pub fn export(directory: &Path, name: &str, plaintext: &[u8]) -> io::Result<PathBuf> {
     validate_name(name)?;
-    fs::create_dir_all(directory)?;
     let path = directory.join(name);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut output = options.open(&path)?;
-    if let Err(error) = output.write_all(plaintext).and_then(|()| output.sync_all()) {
-        drop(output);
-        // Best-effort removal of an incomplete plaintext file; this is not secure disk erasure.
-        let _ = fs::remove_file(&path);
-        return Err(error);
-    }
+    crate::secure_fs::write_new(&path, plaintext)?;
     Ok(path)
 }
 
@@ -118,6 +97,7 @@ pub fn export(directory: &Path, name: &str, plaintext: &[u8]) -> io::Result<Path
 mod tests {
     use super::*;
     use crate::cryphase::{self, Kdf};
+    use std::fs;
 
     #[test]
     fn encrypted_filename_roundtrip_and_password_rotation() {
@@ -125,7 +105,12 @@ mod tests {
         let packed = pack(file_bytes, "My document 01.pdf").unwrap();
         let encrypted =
             cryphase::encrypt_file_container(&packed, b"old password", Kdf::Argon2id).unwrap();
-        assert!(cryphase::is_file_container(&encrypted));
+        assert!(
+            cryphase::decrypt_authenticated(&encrypted, b"old password")
+                .unwrap()
+                .kind
+                == cryphase::PayloadKind::NamedFile
+        );
         let plaintext = cryphase::decrypt_bytes(&encrypted, b"old password").unwrap();
         let (name, bytes) = unpack(&plaintext).unwrap();
         assert_eq!(name, "My document 01.pdf");
@@ -143,7 +128,12 @@ mod tests {
         assert!(cryphase::decrypt_bytes(&tampered, b"old password").is_err());
         // Arbitrary legacy bytes must never be mistaken for a new file container.
         let legacy = cryphase::encrypt_bytes(&packed, b"password", Kdf::Argon2id).unwrap();
-        assert!(!cryphase::is_file_container(&legacy));
+        assert!(
+            cryphase::decrypt_authenticated(&legacy, b"password")
+                .unwrap()
+                .kind
+                != cryphase::PayloadKind::NamedFile
+        );
         assert_eq!(
             &*cryphase::decrypt_bytes(&legacy, b"password").unwrap(),
             &*packed
