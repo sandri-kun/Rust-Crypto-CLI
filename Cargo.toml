@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aes-gcm = { version = "0.10", features = ["zeroize"] }
-aes = { version = "0.8", features = ["zeroize"] }
-ghash = { version = "0.5", features = ["zeroize"] }
-argon2 = { version = "0.5", features = ["zeroize"] }
-crossterm = "0.29"
-pbkdf2 = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
-getrandom = "0.2"
+aes-gcm = { version = "0.11.1", features = ["zeroize"] }
+aes = { version = "0.9.4", features = ["zeroize"] }
+ghash = { version = "0.6.0", features = ["zeroize"] }
+argon2 = { version = "0.6.0", features = ["zeroize"] }
+crossterm = "0.29.0"
+pbkdf2 = "0.13.0"
+sha2 = "0.11.1"
+base64 = "0.23.1"
+getrandom = "0.4.3"
 zeroize = "1.8"
