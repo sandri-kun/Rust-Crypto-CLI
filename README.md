@@ -1,90 +1,217 @@
-# 🦀 Rust Crypto CLI
+# SeedCrypt
 
-> A high-performance, secure command-line tool for encrypting and decrypting sensitive data like seed phrases, built with Rust.
+A Rust command-line application for encrypting text notes and files locally with password-based AES-256-GCM encryption.
 
-[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Crypto](https://img.shields.io/badge/Encryption-AES--256--GCM-blue.svg)](https://en.wikipedia.org/wiki/Galois/Counter_Mode)
-[![Status](https://img.shields.io/badge/Status-Active-success.svg)]()
+SeedCrypt supports multiline and masked input, encrypted JSON notes, drag-and-drop file paths, password changes, and optional storage of the original filename inside encryption. It does not upload your notes or passwords to a service.
 
-## 🛡️ Security Features
+## Quick start
 
-This tool implements modern, industry-standard cryptographic primitives to ensure your sensitive data remains protected:
+Install Rust and Cargo, then run these commands from the project directory:
 
-* **Authenticated Encryption:** Uses **AES-256-GCM** to provide both confidentiality and integrity protection against tampering.
-* **Key Derivation:** Defaults to **Argon2id v1.3** (64 MiB, 3 iterations, 1 lane, 32-byte key). **PBKDF2-HMAC-SHA256** (600,000 iterations) remains available. Both derive keys for AES-256-GCM; Argon2 is not itself the encryption cipher.
-* **Randomness:** Generates unique, cryptographically secure 16-byte **Salts** and 12-byte **Nonces** for every encryption operation using `getrandom`.
-* **Memory Cleanup:** Uses `Zeroizing` guards for passwords, plaintext, derived keys, decrypted output, and Argon2 working memory, including error paths. Enables zeroization features for AES/GHASH internals. Password entry displays one `*` per Unicode character. Backspace removes the last character; Enter submits, and Esc or Ctrl+C cancels. The number of stars reveals password length. Cleanup cannot guarantee erasure of OS swap, crash dumps, terminal history, compiler temporaries, or data after forced process termination.
+```sh
+cargo build --release
+cargo run --release
+```
 
----
+Use an interactive terminal for password prompts. Password entry displays `*` characters, supports Backspace, and accepts Enter to submit. Esc or Ctrl+C cancels masked input.
 
-## 🚀 Getting Started
+Folders are relative to the directory from which you launch the application:
 
-### Prerequisites
-Make sure you have Rust and Cargo installed on your system. If not, get it from [rustup.rs](https://rustup.rs/).
+| Folder | Contents |
+| --- | --- |
+| `secret_notes/` | Encrypted JSON notes you choose to save |
+| `decrypted_files/` | Unencrypted files you explicitly export |
 
+Both folders are excluded by `.gitignore`. This prevents normal Git tracking; it does not encrypt, hide, or back up their contents.
 
-## Ciphertext format and compatibility
+## Main menu
 
-New encryption outputs standard Base64 over:
+| Option | Action |
+| --- | --- |
+| `1` | Encrypt text |
+| `2` | Decrypt Base64 text |
+| `3` | Exit |
+| `4` | Browse saved notes in `secret_notes/` |
+| `5` | Open a JSON note by path or drag and drop |
+| `6` | Change password / Re-encrypt note |
+| `7` | Encrypt a file by path or drag and drop |
+| `8` | Decrypt a file / Export original bytes |
 
-`SEEDCRYPT (9 bytes) | version 0x01 | KDF ID | salt (16 bytes) | nonce (12 bytes) | ciphertext | GCM tag (16 bytes)`
+### Encrypt text
 
-KDF `0x01` selects PBKDF2; `0x02` selects Argon2id. The magic, version, and KDF ID are authenticated as GCM additional data. Parameters above are fixed for version 1; future parameter changes require a new format version. Each encryption generates fresh salt and nonce.
+1. Choose `1`, then enter and confirm a new password.
+2. Select Argon2id (default) or PBKDF2-SHA256.
+3. Select an input mode:
 
-Decryption automatically reads metadata and also supports the original `salt | nonce | ciphertext | tag` PBKDF2 format. It tries authenticated legacy decryption if new-format parsing or authentication fails, including the rare case where an old random salt matches the new marker. Unknown metadata cannot successfully decrypt unless the entire input is independently valid legacy ciphertext. Older application versions cannot decrypt the new format, including new PBKDF2 outputs.
+   | Mode | Input |
+   | --- | --- |
+   | `1` | Single line, visible (default) |
+   | `2` | Multiple lines, visible |
+   | `3` | Single line, masked with `*` |
+   | `4` | Multiple lines, masked with `*` |
 
-Run `cargo run --release`, select encryption, then press Enter for Argon2id or choose PBKDF2. Decryption requires no algorithm selection. Plaintext leading/trailing spaces are preserved; only the input line ending is removed.
+4. Enter your text. For multiline input, enter `.end` on its own line to finish. Use `..end` for a literal `.end` line.
+5. Copy the resulting Base64 ciphertext or choose `Save encrypted note as JSON`.
 
-Validation: `cargo test --release` and `cargo clippy --all-targets -- -D warnings`.
+Spaces and blank lines are preserved. Multiline input joins lines with LF (`\n`); the terminator is excluded. Include a final empty content line if you need a trailing LF. Visible text is echoed to the terminal. Masked input hides characters but reveals their count.
 
+### Save encrypted notes
 
-## Save encrypted notes
+After encryption, choose `Save encrypted note as JSON` and enter a name such as `backup_01` or `backup_01.json`. The `.json` extension is added when omitted.
 
-After encryption, choose `[1] Save encrypted note as JSON` and enter a filename such as `wallet_backup` or `wallet_backup.json`. Files are saved relative to the working directory under `secret_notes/`. Existing files are never overwritten. Names accept 1?100 ASCII letters, numbers, hyphens, or underscores, with an optional `.json` extension; paths and Windows device names are rejected. The directory is excluded by `.gitignore`.
+Saved-note names accept 1-100 ASCII letters, digits, hyphens, or underscores, plus the optional `.json` suffix. Paths and reserved Windows device names are rejected. Existing files are never overwritten; choose another name if a file already exists.
 
-JSON stores only ciphertext and non-secret format metadata: schema/version, AES-256-GCM, Base64 encoding, and KDF parameters. No password, plaintext, preview, or password hash is saved. Choose a filename that does not reveal sensitive details. Public metadata does not require secrecy, but ciphertext can still be attacked offline if someone obtains the file and the password is weak.
+Saving is optional. Returning to the menu without saving discards the generated result unless you have copied the displayed ciphertext elsewhere. File encryption and re-encryption do not print their ciphertext, so save those results to retain them.
 
-To decrypt a saved note, choose main menu `[4] Browse saved notes`, select a numbered JSON file, and enter its password. Press Enter to cancel file selection or to clear the decrypted result. Missing or empty folders are handled without creating files. Only regular files with supported filenames are listed; JSON reads are limited to 16 MiB. The manual Base64 decrypt prompt remains available. Descriptive JSON metadata is not authenticated; decryption relies on the authenticated header inside the ciphertext, not the external JSON fields.
+### Read encrypted text
 
+Choose one of these options:
 
-## Open a dropped JSON file
+- `2`: paste Base64 ciphertext directly.
+- `4`: select a numbered JSON note from `secret_notes/`.
+- `5`: type, paste, or drop a JSON note path, including a file outside `secret_notes/`.
 
-Choose menu `[5] Open JSON file / Drag and drop`, drag one JSON note into the terminal at the path prompt, then press Enter. You can also type or paste its path. Paths containing spaces and paths wrapped in matching single or double quotes are supported, including files outside `secret_notes/`. Enter on an empty prompt cancels. The path is opened as a file and never executed as a shell command.
+Enter the password. Decrypted text appears on a temporary terminal screen. Press Enter to clear it and return; Esc or Ctrl+C also dismisses the result. The plaintext buffer is cleared after rendering, before waiting for dismissal. Terminal-control characters other than LF are escaped when displayed.
 
-Enter the note password to decrypt, then press Enter to clear the result. The same JSON validation and 16 MiB limit apply. Drag-and-drop must be supported by your terminal; pasting a path remains available otherwise.
+Use `8` to restore binary files. Named file containers also require option `8`; the text viewer does not render their metadata as text.
 
+### Encrypt files
 
-## Terminal interface
+1. Choose `7`.
+2. Drag one source file into the path prompt, or type or paste its path, then press Enter.
+3. Answer `Remember original filename inside encryption? [y/N]`:
+   - `y`: store the basename and extension inside authenticated encryption.
+   - Enter or `n`: store file contents without a filename.
+4. Enter and confirm a new password.
+5. Save the encrypted JSON note under a chosen name in `secret_notes/`.
 
-The CLI uses English labels, consistent section headings, numbered options, and `[ok]`, `[info]`, and `[error]` status messages. The ASCII layout works without color or special fonts. Existing menu numbers are preserved. End-of-input at the main menu exits cleanly. This presentation update does not imply security certification or an independent audit.
+Files up to **8 MiB** are supported, including PDFs, images, archives, text, and empty files. Contents are handled as bytes without UTF-8 conversion. File encryption uses Argon2id and AES-256-GCM. The source is never modified or deleted.
 
+Remembering a filename does not store its folder path. The name is encrypted and does not appear in the public JSON metadata. Timestamps, permissions, and directory structure are not preserved.
 
-## Multiline and masked secret input
+### Restore files
 
-Encryption offers four input modes: single line visible (default), multiline visible, single line masked, and multiline masked. Masked input displays `*` characters instead of the secret. Backspace removes the last character; Esc or Ctrl+C cancels masked input. Visible input is echoed by the terminal.
+1. Choose `8` and provide the encrypted JSON path.
+2. Enter its password.
+3. Choose an output filename:
+   - If the original name was stored, press Enter to accept it or type a replacement.
+   - Otherwise, enter a name including the desired extension, such as `restored.pdf`. Empty input cancels.
+   - Enter `/cancel` to cancel either workflow.
 
-For multiline input, enter `.end` on its own line to finish. Enter `..end` to include a literal `.end` line. Spaces and blank lines are preserved, lines are joined with LF, and the terminator is excluded. A final empty content line preserves a trailing LF. End-of-input during visible entry cancels the operation rather than encrypting partial content.
+The application restores the original file bytes to `decrypted_files/`. These exported files are **unencrypted**. Existing files are never overwritten, and authentication must succeed before an output file is created.
 
-## Change password / Re-encrypt note
+Output filenames accept spaces and Unicode, up to 240 UTF-8 bytes. Paths, control characters, Windows-invalid characters, reserved device names, leading dots, and trailing dots or spaces are rejected. Newly exported files use mode `0600` on Unix. Windows exports inherit the destination folder's access controls.
 
-Choose menu `[6] Change password / Re-encrypt note`. Type or drop the source JSON path, enter its current password, then enter and confirm the new password. The source is authenticated before requesting the new password. Plaintext is never displayed or written to disk during this operation and remains in its zeroizing buffer until re-encryption completes.
+### Change a password
 
-The output uses Argon2id (64 MiB, 3 iterations, one lane) and AES-256-GCM with fresh random salt and nonce. Choose `Save encrypted note as JSON` and enter a new filename to persist the change. Existing files are never overwritten. Cancelling without saving discards the new ciphertext. The original file and any older copies still accept the old password; creating a new note does not revoke access to those copies.
+1. Choose `6` and provide the source JSON path.
+2. Enter the current password. The application authenticates the note first.
+3. Enter and confirm the new password.
+4. Save the result under a new filename.
 
+The new ciphertext uses Argon2id with fresh salt and nonce. Plaintext is neither displayed nor written to disk during re-encryption. Text, raw binary files, and named file containers are supported; stored filename metadata is preserved.
 
-## Encrypt files with drag and drop
+The original note is retained and still accepts the original password. Re-encrypting does not revoke access to old copies. Cancelling before saving discards the newly generated ciphertext.
 
-Choose `[7] Encrypt file / Drag and drop`, drop one source file into the path prompt (or type its path), and press Enter. Files up to 8 MiB are supported, including PDFs, images, archives, text, and empty files. Directories and symlinks are rejected. Enter and confirm a password, then choose to save the result as JSON in `secret_notes/`. The source is never changed or deleted. Encryption uses Argon2id and AES-256-GCM with fresh random salt and nonce. File contents are read as bytes, not converted to text.
+### Drag and drop
 
-Choose `[8] Decrypt file / Export original bytes`, provide the encrypted JSON path and password, then enter an output filename including the extension you want. The original filename and extension can optionally be stored inside encryption. Timestamps, permissions, and directory structure are not stored. Only the file contents are restored, byte for byte. Outputs are written unencrypted to `decrypted_files/`, which is ignored by Git; existing files are never overwritten. On Unix, newly exported files are created with mode 0600. On Windows, access follows the destination folder permissions. Authentication must succeed before any plaintext file is created. RAM buffers are zeroized when finished or cancelled; this does not erase source or exported files from disk.
+Choose the relevant menu first, then drop **one file** at the path prompt and press Enter. Drag and drop must be supported by your terminal. If it is unavailable, paste or type the path instead.
 
-Menu 6 also supports changing the password of encrypted binary files. Use menu 8 to export their contents; the text viewer requires valid UTF-8. Existing text notes and legacy ciphertext remain supported. The 8 MiB input cap keeps Base64 JSON output within the existing 16 MiB JSON read limit. This implementation loads each file into RAM and does not provide streaming encryption.
+Paths containing spaces and paths wrapped in matching single or double quotes are supported. Paths are opened as data and are never executed as shell commands. Enter at an empty path prompt cancels. Directories and final-component symlinks are rejected by the file readers.
 
+## Cryptography and memory handling
 
-## Remember the original filename (optional)
+| Component | Configuration |
+| --- | --- |
+| Encryption | AES-256-GCM, 16-byte authentication tag |
+| Default key derivation | Argon2id v1.3, 64 MiB, 3 iterations, 1 lane |
+| Alternative for text encryption | PBKDF2-HMAC-SHA256, 600,000 iterations |
+| Derived key | 32 bytes |
+| Salt | 16 random bytes per encryption |
+| Nonce | 12 random bytes per encryption |
+| Random source | Operating-system randomness via `getrandom` |
 
-Menu 7 asks `Remember original filename inside encryption? [y/N]`. Enter `y` to store only the basename (including extension) inside the encrypted, authenticated content. Enter `n` or press Enter to keep the previous raw-byte format. No source folder path is saved; the basename does not appear in public JSON metadata.
+Argon2id and PBKDF2 derive encryption keys from passwords; AES-GCM performs authenticated encryption. File encryption and password changes always use Argon2id.
 
-When opening a named file in menu 8, `Output filename [original-name.ext]` lets you press Enter to use its original name, type a replacement, or enter `/cancel`. For older files or files encrypted without a name, Enter still cancels and the output filename must be entered manually. Existing files are never overwritten. Filenames with spaces and Unicode are supported up to 240 UTF-8 bytes; path separators, Windows-invalid characters, reserved device names and unsafe endings are rejected.
+Passwords, plaintext, derived keys, decrypted buffers, and Argon2 working memory use `Zeroizing` guards, including error paths. Derived keys are dropped after initializing the cipher. AES/GHASH zeroization features are enabled. Decrypted text borrows from its guarded byte buffer through `SecretText`, avoiding an extra plaintext string copy. Encryption reserves room for the authentication tag before copying plaintext.
 
-Named files use authenticated payload version 2. KDF parameters and AES-GCM remain the same as version 1; decrypted content is `name_length_u16_le | UTF-8 basename | file bytes`. Version 1 remains raw content, so older files cannot be accidentally interpreted as filename metadata. Menu 6 preserves this file-container version when changing a password. Older application versions cannot open version 2 notes. The text viewer directs named files to menu 8.
+This is an application-level memory cleanup strategy, not a guarantee that every copy of sensitive data is erased. It does not lock RAM or guarantee removal of OS swap, crash dumps, compiler temporaries, terminal buffers, clipboard contents, source files, or exported plaintext. Forced termination may bypass cleanup. Clearing the temporary result screen cannot erase screenshots or terminal recording logs.
+
+Encrypted data can be attacked offline by someone who obtains it. Use strong, unique passwords and retain backups and passwords separately. Lost passwords cannot be recovered by the application. This project does not claim independent security auditing or certification.
+
+## JSON note format
+
+A saved note contains ciphertext and descriptive format metadata:
+
+```json
+{
+  "schema": "seedcrypt-note",
+  "schema_version": 1,
+  "payload_version": 1,
+  "cipher": "AES-256-GCM",
+  "encoding": "base64",
+  "kdf": {
+    "name": "Argon2id",
+    "version": 19,
+    "memory_kib": 65536,
+    "iterations": 3,
+    "parallelism": 1,
+    "key_bytes": 32
+  },
+  "ciphertext": "<Base64-encoded encrypted payload>"
+}
+```
+
+The example uses a placeholder, not valid ciphertext. Named files use `payload_version: 2`. JSON never intentionally stores plaintext, passwords, plaintext previews, or password verification hashes. Filenames you choose for JSON notes are visible on disk; avoid sensitive names.
+
+External JSON metadata is descriptive and is not authenticated. The reader validates the schema, schema version, encoding, and ciphertext structure; algorithm selection comes from the authenticated payload header rather than the external `kdf` fields.
+
+JSON reads are limited to **16 MiB**. The **8 MiB** file input limit leaves room for Base64 expansion and metadata. File operations load content into RAM; streaming encryption is not implemented.
+
+## Payload format and compatibility
+
+Standard Base64 wraps this binary payload:
+
+```text
+SEEDCRYPT | version | KDF ID | salt | nonce | ciphertext | authentication tag
+ 9 bytes    1 byte   1 byte   16 B   12 B      variable          16 B
+```
+
+The magic, version, and KDF ID are authenticated as AES-GCM additional data.
+
+| Field | Values |
+| --- | --- |
+| Payload version `0x01` | Raw content: UTF-8 text or arbitrary file bytes |
+| Payload version `0x02` | File container with an encrypted original filename |
+| KDF ID `0x01` | PBKDF2-HMAC-SHA256 |
+| KDF ID `0x02` | Argon2id |
+
+Version 2 encrypts `filename_length_u16_le | UTF-8 basename | original file bytes`. Versions 1 and 2 use the KDF parameters listed above. Future parameter changes must not silently reinterpret these versions.
+
+Decryption also accepts the original headerless PBKDF2 format:
+
+```text
+salt (16 B) | nonce (12 B) | ciphertext | authentication tag (16 B)
+```
+
+If new-format parsing or authentication fails, the application attempts authenticated legacy decryption. This preserves old ciphertext even if its random salt happens to match the new marker. Successful decryption still requires a valid GCM tag. Older application versions cannot necessarily read newer versioned payloads, including named file containers.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --release
+```
+
+Tests cover independent compatibility vectors, both KDFs, authentication failures, malformed input, legacy marker collisions, plaintext buffer reuse, multiline input, JSON handling, safe filenames, binary file restoration, optional encrypted filenames, password rotation, and overwrite prevention.
+
+The command-line menu has also been smoke-tested. Automated unit tests do not verify every terminal's interactive password entry, drag-and-drop behavior, or alternate-screen cleanup; check those in your target terminal.
+
+| Source | Responsibility |
+| --- | --- |
+| `src/main.rs` | Application entry point |
+| `src/app.rs` | CLI menus, masked input, and user workflows |
+| `src/cryphase.rs` | Key derivation, encryption, decryption, and payload compatibility |
+| `src/notes.rs` | JSON note storage, validation, and file-path handling |
+| `src/files.rs` | Binary input, encrypted filename containers, and plaintext export |
