@@ -1,4 +1,4 @@
-# SeedCrypt
+# SeedCrypt 🦀
 
 A Rust command-line application for encrypting text notes and files locally with password-based AES-256-GCM encryption.
 
@@ -17,27 +17,29 @@ An interactive terminal is required for all prompts; redirected input and output
 
 Folders are relative to the directory from which you launch the application:
 
-| Folder | Contents |
-| --- | --- |
-| `secret_notes/` | Encrypted JSON notes you choose to save |
+
+| Folder             | Contents                                |
+| -------------------- | ----------------------------------------- |
+| `secret_notes/`    | Encrypted JSON notes you choose to save |
 | `decrypted_files/` | Unencrypted files you explicitly export |
 
 Both folders are excluded by `.gitignore`. This prevents normal Git tracking; it does not encrypt, hide, or back up their contents.
 
 ## Main menu
 
-| Option | Action |
-| --- | --- |
-| `1` | Encrypt text |
-| `2` | Decrypt Base64 text |
-| `3` | Exit |
-| `4` | Browse saved notes in `secret_notes/` |
-| `5` | Open a JSON note by path or drag and drop |
-| `6` | Change password / Re-encrypt note |
-| `7` | Encrypt a file by path or drag and drop |
-| `8` | Decrypt a file / Export original bytes |
-| `9` | Batch encrypt a folder |
-| `10` | Batch decrypt a folder |
+
+| Option | Action                                    |
+| -------- | ------------------------------------------- |
+| `1`    | Encrypt text                              |
+| `2`    | Decrypt Base64 text                       |
+| `3`    | Exit                                      |
+| `4`    | Browse saved notes in `secret_notes/`     |
+| `5`    | Open a JSON note by path or drag and drop |
+| `6`    | Change password / Re-encrypt note         |
+| `7`    | Encrypt a file by path or drag and drop   |
+| `8`    | Decrypt a file / Export original bytes    |
+| `9`    | Batch encrypt a folder                    |
+| `10`   | Batch decrypt a folder                    |
 
 ### Encrypt text
 
@@ -45,13 +47,13 @@ Both folders are excluded by `.gitignore`. This prevents normal Git tracking; it
 2. Select Argon2id (default) or PBKDF2-SHA256.
 3. Select an input mode:
 
-   | Mode | Input |
-   | --- | --- |
-   | `1` | Single line, visible (default) |
-   | `2` | Multiple lines, visible |
-   | `3` | Single line, masked with `*` |
-   | `4` | Multiple lines, masked with `*` |
 
+   | Mode | Input                           |
+   | ------ | --------------------------------- |
+   | `1`  | Single line, visible (default)  |
+   | `2`  | Multiple lines, visible         |
+   | `3`  | Single line, masked with `*`    |
+   | `4`  | Multiple lines, masked with `*` |
 4. Enter your text. For multiline input, enter `.end` on its own line to finish. Use `..end` for a literal `.end` line.
 5. Copy the resulting Base64 ciphertext or choose `Save encrypted note as JSON`.
 
@@ -143,15 +145,16 @@ Original names are restored when stored; otherwise safe fallback names such as `
 
 ## Cryptography and memory handling
 
-| Component | Configuration |
-| --- | --- |
-| Encryption | AES-256-GCM, 16-byte authentication tag |
-| Default key derivation | Argon2id v1.3, 64 MiB, 3 iterations, 1 lane |
-| Alternative for text encryption | PBKDF2-HMAC-SHA256, 600,000 iterations |
-| Derived key | 32 bytes |
-| Salt | 16 random bytes per encryption |
-| Nonce | 12 random bytes per encryption |
-| Random source | Operating-system randomness via `getrandom` |
+
+| Component                       | Configuration                               |
+| --------------------------------- | --------------------------------------------- |
+| Encryption                      | AES-256-GCM, 16-byte authentication tag     |
+| Default key derivation          | Argon2id v1.3, 64 MiB, 3 iterations, 1 lane |
+| Alternative for text encryption | PBKDF2-HMAC-SHA256, 600,000 iterations      |
+| Derived key                     | 32 bytes                                    |
+| Salt                            | 16 random bytes per encryption              |
+| Nonce                           | 12 random bytes per encryption              |
+| Random source                   | Operating-system randomness via `getrandom` |
 
 Argon2id and PBKDF2 derive encryption keys from passwords; AES-GCM performs authenticated encryption. File encryption and password changes always use Argon2id.
 
@@ -201,15 +204,16 @@ SEEDCRYPT | version | KDF ID | salt | nonce | ciphertext | authentication tag
 
 The magic, version, and KDF ID are authenticated as AES-GCM additional data.
 
-| Field | Values |
-| --- | --- |
-| Payload version `0x01` | Raw content: UTF-8 text or arbitrary file bytes |
+
+| Field                  | Values                                                        |
+| ------------------------ | --------------------------------------------------------------- |
+| Payload version `0x01` | Raw content: UTF-8 text or arbitrary file bytes               |
 | Payload version `0x02` | Standalone file container with an encrypted original filename |
-| Payload version `0x03` | Batch-bound raw content |
-| Payload version `0x04` | Batch-bound named file content |
-| Payload version `0x05` | Encrypted batch manifest |
-| KDF ID `0x01` | PBKDF2-HMAC-SHA256 |
-| KDF ID `0x02` | Argon2id |
+| Payload version `0x03` | Batch-bound raw content                                       |
+| Payload version `0x04` | Batch-bound named file content                                |
+| Payload version `0x05` | Encrypted batch manifest                                      |
+| KDF ID `0x01`          | PBKDF2-HMAC-SHA256                                            |
+| KDF ID `0x02`          | Argon2id                                                      |
 
 Version 2 encrypts `filename_length_u16_le | UTF-8 basename | original file bytes`. Versions 3 and 4 prepend `batch_id (16 bytes) | index_u32_le` to raw or named-file content. Version 5 encrypts a JSON manifest. Versions 1 through 5 use the KDF parameters listed above. Future parameter changes must not silently reinterpret these versions.
 
@@ -233,18 +237,18 @@ Tests cover independent compatibility vectors, both KDFs, authentication failure
 
 Password masking, visible multiline input, legacy decryption, result-screen dismissal and menu exit have been exercised in an interactive Windows terminal with dummy data. Unit tests do not verify every terminal or drag-and-drop integration; check those in your target terminal. Windows and Unix/Android paths pass Clippy; Unix filesystem behavior has not been runtime-tested in this Windows workspace.
 
-| Source | Responsibility |
-| --- | --- |
-| `src/main.rs` | Application entry point |
-| `src/app.rs` | CLI menus, masked input, and user workflows |
-| `src/batch.rs` | Nonrecursive batch planning, sequential processing, and per-file results |
-| `src/cryphase.rs` | Key derivation, encryption, decryption, and payload compatibility |
-| `src/notes.rs` | JSON note storage, validation, and file-path handling |
-| `src/files.rs` | Binary input, encrypted filename containers, and plaintext export |
-| `src/limits.rs` | Shared input, ciphertext, and JSON size limits |
-| `src/secure_fs.rs` | Handle-based access, atomic no-overwrite output and link/reparse rejection |
-| `src/password.rs` | New-password policy, separate from legacy decryption |
 
+| Source             | Responsibility                                                             |
+| -------------------- | ---------------------------------------------------------------------------- |
+| `src/main.rs`      | Application entry point                                                    |
+| `src/app.rs`       | CLI menus, masked input, and user workflows                                |
+| `src/batch.rs`     | Nonrecursive batch planning, sequential processing, and per-file results   |
+| `src/cryphase.rs`  | Key derivation, encryption, decryption, and payload compatibility          |
+| `src/notes.rs`     | JSON note storage, validation, and file-path handling                      |
+| `src/files.rs`     | Binary input, encrypted filename containers, and plaintext export          |
+| `src/limits.rs`    | Shared input, ciphertext, and JSON size limits                             |
+| `src/secure_fs.rs` | Handle-based access, atomic no-overwrite output and link/reparse rejection |
+| `src/password.rs`  | New-password policy, separate from legacy decryption                       |
 
 ### Filesystem hardening
 
@@ -253,7 +257,6 @@ Output is staged, flushed and atomically published without overwriting. Recovera
 On Windows, the application opens each ancestor with reparse-point processing disabled, checks its metadata through the handle, and holds handles that deny write/delete sharing while resolving and accessing the child. File handles also prevent concurrent replacement. On Unix, it walks directories using `openat` with `O_DIRECTORY` and `O_NOFOLLOW`, then opens the final basename relative to the pinned parent descriptor. New output files use exclusive creation. Incomplete writes trigger best-effort removal through the file handle on Windows or pinned parent on Unix.
 
 Use a trusted working directory and appropriate folder permissions. These protections do not defend against administrators, malware already able to inspect the process, or an account that can read exported plaintext through inherited filesystem permissions. Removing an incomplete file is not secure disk erasure, and a crash or failed cleanup can leave partial output.
-
 
 ### Dependency advisory checks
 
@@ -277,11 +280,9 @@ On Unix, run:
 
 The security remediation run checked 78 locked dependencies against the RustSec database updated on 2026-11-21 and reported no known vulnerabilities or warnings. This is a point-in-time result, not a permanent guarantee; refresh the database and repeat the check when dependencies change.
 
-
 ## Security checks before release
 
 See [SECURITY.md](SECURITY.md) for the threat model, batch integrity rules, panic/cleanup behavior and remaining release-owner responsibilities. The release profile uses unwinding so ordinary panics run cleanup guards. `.github/workflows/security.yml` runs release tests and builds on Windows and Linux, plus advisory checks. The workflow has read-only repository permissions and pins its checkout action. It does not publish artifacts, sign binaries or prove resistance to real power loss.
-
 
 ## Termux / Android storage
 
