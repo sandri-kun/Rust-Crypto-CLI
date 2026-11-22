@@ -1,6 +1,84 @@
 use crate::cryphase;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled},
+};
 use std::io::{self, Write};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+struct PasswordTerminal {
+    restore: bool,
+}
+
+impl Drop for PasswordTerminal {
+    fn drop(&mut self) {
+        if self.restore {
+            let _ = disable_raw_mode();
+        }
+    }
+}
+
+fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
+    let restore = !is_raw_mode_enabled()?;
+    enable_raw_mode()?;
+    let terminal = PasswordTerminal { restore };
+    let mut output = io::stdout();
+    write!(output, "{prompt}")?;
+    output.flush()?;
+    let mut password = Zeroizing::new(String::with_capacity(128));
+    let result = loop {
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Enter => break Ok(password),
+            KeyCode::Esc => {
+                break Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Input dibatalkan",
+                ));
+            }
+            KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                break Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Input dibatalkan",
+                ));
+            }
+            KeyCode::Backspace => {
+                if let Some((index, _)) = password.char_indices().next_back() {
+                    // Wipe removed UTF-8 bytes too, rather than leaving them after truncation.
+                    let removed = Zeroizing::new(password.split_off(index));
+                    drop(removed);
+                    write!(output, "\x08 \x08")?;
+                }
+            }
+            KeyCode::Char(mut character)
+                if !character.is_control()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                // Grow into a guarded allocation so the previous allocation is wiped.
+                if password.len() + character.len_utf8() > password.capacity() {
+                    let mut larger = Zeroizing::new(String::with_capacity(password.capacity() * 2));
+                    larger.push_str(&password);
+                    password = larger;
+                }
+                password.push(character);
+                character.zeroize();
+                write!(output, "*")?;
+            }
+            _ => {}
+        }
+        output.flush()?;
+    };
+    drop(terminal);
+    writeln!(output)?;
+    result
+}
 
 pub fn run() {
     loop {
@@ -73,8 +151,8 @@ where
 
 fn encrypt_menu() {
     println!("\n--- ENKRIPSI ---");
-    let password = match rpassword::prompt_password("Masukkan password: ") {
-        Ok(password) => Zeroizing::new(password),
+    let password = match password_prompt("Masukkan password: ") {
+        Ok(password) => password,
         Err(error) => {
             println!("Gagal membaca password: {error}");
             return;
@@ -110,8 +188,8 @@ fn encrypt_menu() {
 
 fn decrypt_menu() {
     println!("\n--- DEKRIPSI ---");
-    let password = match rpassword::prompt_password("Masukkan password: ") {
-        Ok(password) => Zeroizing::new(password),
+    let password = match password_prompt("Masukkan password: ") {
+        Ok(password) => password,
         Err(error) => {
             println!("Gagal membaca password: {error}");
             return;

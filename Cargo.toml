@@ -8,7 +8,7 @@ aes-gcm = { version = "0.10", features = ["zeroize"] }
 aes = { version = "0.8", features = ["zeroize"] }
 ghash = { version = "0.5", features = ["zeroize"] }
 argon2 = { version = "0.5", features = ["zeroize"] }
-rpassword = "7"
+crossterm = "0.29"
 pbkdf2 = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
