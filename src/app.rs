@@ -125,6 +125,8 @@ pub fn run() {
         println!("  [6] Change password / Re-encrypt note");
         println!("  [7] Encrypt file / Drag and drop");
         println!("  [8] Decrypt file / Export original bytes");
+        println!("  [9] Batch encrypt folder");
+        println!(" [10] Batch decrypt folder");
         println!();
         println!("  [3] Exit");
         println!("  ----------------------------------------");
@@ -145,6 +147,8 @@ pub fn run() {
             "6" => reencrypt_menu(),
             "7" => file_menu(true),
             "8" => file_menu(false),
+            "9" => batch_menu(true),
+            "10" => batch_menu(false),
             "3" => {
                 println!("\nGoodbye.");
                 break;
@@ -761,6 +765,201 @@ fn file_menu(encrypting: bool) {
             }
         }
     }
+}
+
+fn batch_menu(encrypting: bool) {
+    section(
+        if encrypting {
+            "BATCH ENCRYPT"
+        } else {
+            "BATCH DECRYPT"
+        },
+        "One folder, no subfolders. Files are processed sequentially.",
+    );
+    let source = input_prompt("  Source folder (drag and drop; Enter to cancel): ");
+    if source.trim().is_empty() {
+        return;
+    }
+    let source = match crate::notes::dropped_path(&source) {
+        Ok(path) => path,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    let mode = if encrypting {
+        crate::batch::Mode::Encrypt
+    } else {
+        crate::batch::Mode::Decrypt
+    };
+    let plan = match crate::batch::prepare(&source, mode) {
+        Ok(plan) => plan,
+        Err(error) => {
+            println!("[error] Could not read source folder: {error}");
+            return;
+        }
+    };
+    if plan.files.is_empty() {
+        println!(
+            "[info] No eligible files found. Skipped {} entries.",
+            plan.skipped
+        );
+        return;
+    }
+    let mut random = [0; 8];
+    if let Err(error) = getrandom::fill(&mut random) {
+        println!("[error] {error}");
+        return;
+    }
+    let default = format!(
+        "{}/batch_{:016x}",
+        if encrypting {
+            "secret_notes"
+        } else {
+            "decrypted_files"
+        },
+        u64::from_le_bytes(random)
+    );
+    let destination = input_prompt(&format!(
+        "  Output folder [{default}] (/cancel to cancel): "
+    ));
+    if destination.trim() == "/cancel" {
+        return;
+    }
+    let destination = match crate::notes::dropped_path(if destination.trim().is_empty() {
+        &default
+    } else {
+        &destination
+    }) {
+        Ok(path) => path,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    let remember = if encrypting {
+        loop {
+            let answer = input_prompt("  Store original filenames inside encryption? [Y/n]: ");
+            match answer.trim().to_ascii_lowercase().as_str() {
+                "" | "y" | "yes" => break true,
+                "n" | "no" => break false,
+                _ => println!("[error] Enter y or n."),
+            }
+        }
+    } else {
+        false
+    };
+    println!("\n  Source: {:?}\n  Output: {:?}", source, destination);
+    println!(
+        "  Files: {} | Skipped entries: {}",
+        plan.files.len(),
+        plan.skipped
+    );
+    for (index, path) in plan.files.iter().enumerate() {
+        println!(
+            "  [{}] {:?}",
+            index + 1,
+            path.file_name().unwrap_or_default()
+        );
+    }
+    if !encrypting {
+        println!("[info] Decrypted files will be written UNENCRYPTED to the output folder.");
+    }
+    println!(
+        "  Existing files are never overwritten. Different-password files will fail individually."
+    );
+    let proceed = input_prompt("  Process these files? [y/N]: ");
+    if !matches!(proceed.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return;
+    }
+    let password = match if encrypting {
+        confirmed_password()
+    } else {
+        password_prompt("  Batch password: ")
+    } {
+        Ok(password) => password,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    println!("\n  Processing... Press Esc or Ctrl+C to stop after the current file.");
+    let restore = match is_raw_mode_enabled().and_then(|enabled| {
+        enable_raw_mode()?;
+        Ok(!enabled)
+    }) {
+        Ok(restore) => restore,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    let terminal = PasswordTerminal { restore };
+    let summary = crate::batch::run(
+        &plan,
+        &destination,
+        &password,
+        remember,
+        |index, source, result| {
+            match result {
+                Ok(output) => {
+                    let _ = write!(
+                        io::stdout(),
+                        "[ok] [{}/{}] {:?} -> {:?}\r\n",
+                        index + 1,
+                        plan.files.len(),
+                        source.file_name().unwrap_or_default(),
+                        output
+                    );
+                }
+                Err(error) => {
+                    let _ = write!(
+                        io::stdout(),
+                        "[error] [{}/{}] {:?}: {}\r\n",
+                        index + 1,
+                        plan.files.len(),
+                        source.file_name().unwrap_or_default(),
+                        error
+                    );
+                }
+            }
+            if io::stdout().flush().is_err() {
+                return false;
+            }
+            for _ in 0..64 {
+                match event::poll(std::time::Duration::ZERO) {
+                    Ok(false) => break,
+                    Err(_) => return false,
+                    Ok(true) => {}
+                }
+                match event::read() {
+                    Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => {
+                        if key.code == KeyCode::Esc
+                            || (matches!(key.code, KeyCode::Char('c' | 'C'))
+                                && key.modifiers.contains(KeyModifiers::CONTROL))
+                        {
+                            return false;
+                        }
+                    }
+                    Err(_) => return false,
+                    _ => {}
+                }
+            }
+            true
+        },
+    );
+    drop(terminal);
+    drop(password);
+    let remaining = plan.files.len() - summary.succeeded - summary.failed;
+    println!("\n  BATCH SUMMARY\n  ----------------------------------------");
+    println!(
+        "  Succeeded: {} | Failed: {} | Skipped entries: {} | Not processed: {}",
+        summary.succeeded, summary.failed, summary.skipped, remaining
+    );
+    if summary.cancelled {
+        println!("[info] Batch stopped. Completed outputs are retained.");
+    }
+    println!("  Output folder: {:?}", destination);
 }
 
 #[cfg(test)]

@@ -36,6 +36,8 @@ Both folders are excluded by `.gitignore`. This prevents normal Git tracking; it
 | `6` | Change password / Re-encrypt note |
 | `7` | Encrypt a file by path or drag and drop |
 | `8` | Decrypt a file / Export original bytes |
+| `9` | Batch encrypt a folder |
+| `10` | Batch decrypt a folder |
 
 ### Encrypt text
 
@@ -118,6 +120,22 @@ The original note is retained and still accepts the original password. Re-encryp
 Choose the relevant menu first, then drop **one file** at the path prompt and press Enter. Drag and drop must be supported by your terminal. If it is unavailable, paste or type the path instead.
 
 Paths containing spaces and paths wrapped in matching single or double quotes are supported. Paths are opened as data and are never executed as shell commands. Enter at an empty path prompt cancels. File reads and writes reject links or reparse points throughout the path, and reject parent-directory (`..`) components. On Windows, only local drive paths are accepted; UNC/network and device paths are rejected. Move the file to a regular local folder if its path passes through a junction.
+
+### Batch encrypt and decrypt
+
+Choose `9` to encrypt all regular files directly inside one source folder, or `10` to decrypt its `.json` files. Subfolders, links, and non-JSON files in decrypt mode are skipped. A batch supports up to 1,000 eligible files; each encrypted source file still has the 8 MiB input limit.
+
+1. Type, paste, or drop the source folder path.
+2. Accept the proposed fresh output folder or enter another output folder. Defaults are `secret_notes/batch_<random-id>/` for encryption and `decrypted_files/batch_<random-id>/` for decryption.
+3. For encryption, choose whether to remember original filenames inside encryption (default: yes).
+4. Review the file list and output folder, then enter `y` to proceed.
+5. Enter one password for the batch; encryption asks for confirmation.
+
+Processing is sequential, so only one file's content and Argon2 working memory are needed at a time. Each file gets fresh random salt and nonce and is encrypted independently using Argon2id and AES-256-GCM. Output JSON filenames are opaque (`note_0001.json`, etc.). If original names are stored, menu 10 restores them; older or unnamed files are exported as `restored_0001.bin`, etc. These fallback names do not preserve extensions.
+
+Existing output files are never overwritten. Duplicate restored names, wrong passwords, invalid notes, unsafe filenames, oversized files, and read/write errors fail that file while the batch continues. Files encrypted with different passwords must be retried separately with the appropriate password. The final summary reports successes, failures, skipped entries, and files not processed. Batch decrypt writes **unencrypted** data to the selected output folder, so choose a trusted private folder.
+
+Press Esc or Ctrl+C during processing to stop after the current file completes. Completed outputs remain; unprocessed files are left alone. Folder contents are listed before output is written, so newly generated files do not get added to the current batch. The source files are never modified or deleted. Folder scanning is nonrecursive: use menu 10 on the specific generated batch subfolder rather than its parent `secret_notes/` folder.
 
 ## Cryptography and memory handling
 
@@ -212,6 +230,7 @@ Password masking, visible multiline input, legacy decryption, result-screen dism
 | --- | --- |
 | `src/main.rs` | Application entry point |
 | `src/app.rs` | CLI menus, masked input, and user workflows |
+| `src/batch.rs` | Nonrecursive batch planning, sequential processing, and per-file results |
 | `src/cryphase.rs` | Key derivation, encryption, decryption, and payload compatibility |
 | `src/notes.rs` | JSON note storage, validation, and file-path handling |
 | `src/files.rs` | Binary input, encrypted filename containers, and plaintext export |

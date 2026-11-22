@@ -1,4 +1,5 @@
 mod app;
+mod batch;
 mod cryphase;
 mod files;
 mod limits;
