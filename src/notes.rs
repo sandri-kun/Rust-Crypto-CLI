@@ -7,6 +7,11 @@ use std::{
 };
 
 pub fn list(directory: &Path) -> io::Result<Vec<String>> {
+    let _directory = match crate::secure_fs::open_directory(directory) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -97,6 +102,12 @@ pub fn load_path(path: &Path) -> io::Result<String> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Unsupported note format.",
+        ));
+    }
+    if note.ciphertext.len() > crate::limits::MAX_BASE64_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Ciphertext exceeds the supported size limit.",
         ));
     }
     let decoded = BASE64.decode(&note.ciphertext).map_err(|_| {

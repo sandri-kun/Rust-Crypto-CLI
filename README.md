@@ -13,7 +13,7 @@ cargo build --release
 cargo run --release
 ```
 
-Use an interactive terminal for password prompts. Password entry displays `*` characters, supports Backspace, and accepts Enter to submit. Esc or Ctrl+C cancels masked input.
+An interactive terminal is required for all prompts; redirected input and output are rejected. Password entry displays `*` characters, supports Backspace, and accepts Enter to submit. Esc or Ctrl+C cancels masked input.
 
 Folders are relative to the directory from which you launch the application:
 
@@ -53,7 +53,7 @@ Both folders are excluded by `.gitignore`. This prevents normal Git tracking; it
 4. Enter your text. For multiline input, enter `.end` on its own line to finish. Use `..end` for a literal `.end` line.
 5. Copy the resulting Base64 ciphertext or choose `Save encrypted note as JSON`.
 
-Spaces and blank lines are preserved. Multiline input joins lines with LF (`\n`); the terminator is excluded. Include a final empty content line if you need a trailing LF. Visible text is echoed to the terminal. Masked input hides characters but reveals their count.
+Spaces and blank lines are preserved. Multiline input joins lines with LF (`\n`); the terminator is excluded. Include a final empty content line if you need a trailing LF. Visible text is echoed to the terminal. Masked input hides characters but reveals their count. Both modes use terminal events and guarded buffers rather than the shared buffered `stdin` reader. Text input is limited to 8 MiB in total, including multiline separators; passwords are limited to 1,024 UTF-8 bytes. Esc or Ctrl+C cancels either input mode.
 
 ### Save encrypted notes
 
@@ -117,7 +117,7 @@ The original note is retained and still accepts the original password. Re-encryp
 
 Choose the relevant menu first, then drop **one file** at the path prompt and press Enter. Drag and drop must be supported by your terminal. If it is unavailable, paste or type the path instead.
 
-Paths containing spaces and paths wrapped in matching single or double quotes are supported. Paths are opened as data and are never executed as shell commands. Enter at an empty path prompt cancels. Directories and final-component symlinks are rejected by the file readers.
+Paths containing spaces and paths wrapped in matching single or double quotes are supported. Paths are opened as data and are never executed as shell commands. Enter at an empty path prompt cancels. File reads and writes reject links or reparse points throughout the path, and reject parent-directory (`..`) components. On Windows, only local drive paths are accepted; UNC/network and device paths are rejected. Move the file to a regular local folder if its path passes through a junction.
 
 ## Cryptography and memory handling
 
@@ -133,7 +133,7 @@ Paths containing spaces and paths wrapped in matching single or double quotes ar
 
 Argon2id and PBKDF2 derive encryption keys from passwords; AES-GCM performs authenticated encryption. File encryption and password changes always use Argon2id.
 
-Passwords, plaintext, derived keys, decrypted buffers, and Argon2 working memory use `Zeroizing` guards, including error paths. Derived keys are dropped after initializing the cipher. AES/GHASH zeroization features are enabled. Decrypted text borrows from its guarded byte buffer through `SecretText`, avoiding an extra plaintext string copy. Encryption reserves room for the authentication tag before copying plaintext.
+Passwords, plaintext, derived keys, decrypted buffers, and Argon2 working memory use `Zeroizing` guards, including error paths. Application-owned terminal input buffers grow by copying into a new guarded allocation and wiping the previous allocation; plaintext is not read through `stdin().read_line()`. Terminal libraries and the operating system can still hold their own copies. Derived keys are dropped after initializing the cipher. AES/GHASH zeroization features are enabled. Decrypted text borrows from its guarded byte buffer through `SecretText`, avoiding an extra plaintext string copy. Encryption reserves room for the authentication tag before copying plaintext.
 
 This is an application-level memory cleanup strategy, not a guarantee that every copy of sensitive data is erased. It does not lock RAM or guarantee removal of OS swap, crash dumps, compiler temporaries, terminal buffers, clipboard contents, source files, or exported plaintext. Forced termination may bypass cleanup. Clearing the temporary result screen cannot erase screenshots or terminal recording logs.
 
@@ -166,7 +166,7 @@ The example uses a placeholder, not valid ciphertext. Named files use `payload_v
 
 External JSON metadata is descriptive and is not authenticated. The reader validates the schema, schema version, encoding, and ciphertext structure; algorithm selection comes from the authenticated payload header rather than the external `kdf` fields.
 
-JSON reads are limited to **16 MiB**. The **8 MiB** file input limit leaves room for Base64 expansion and metadata. File operations load content into RAM; streaming encryption is not implemented.
+JSON reads are limited to **16 MiB**. The **8 MiB** file input limit leaves room for Base64 expansion and metadata. File operations load content into RAM; streaming encryption is not implemented. Shared limits in `src/limits.rs` cap encryption input, Base64 decoding and note storage. A successfully saved note fits within the JSON read limit, including maximum-size named files.
 
 ## Payload format and compatibility
 
@@ -194,7 +194,7 @@ Decryption also accepts the original headerless PBKDF2 format:
 salt (16 B) | nonce (12 B) | ciphertext | authentication tag (16 B)
 ```
 
-If new-format parsing or authentication fails, the application attempts authenticated legacy decryption. This preserves old ciphertext even if its random salt happens to match the new marker. Successful decryption still requires a valid GCM tag. Older application versions cannot necessarily read newer versioned payloads, including named file containers.
+If new-format parsing or authentication fails, the application attempts authenticated legacy decryption. This preserves old ciphertext even if its random salt happens to match the new marker. Successful decryption still requires a valid GCM tag. The successful authentication path returns the payload type alongside its guarded plaintext. Text display, file export and password changes use that authenticated type rather than reinterpreting the input prefix. Older application versions cannot necessarily read newer versioned payloads, including named file containers.
 
 ## Development
 
@@ -206,7 +206,7 @@ cargo test --release
 
 Tests cover independent compatibility vectors, both KDFs, authentication failures, malformed input, legacy marker collisions, plaintext buffer reuse, multiline input, JSON handling, safe filenames, binary file restoration, optional encrypted filenames, password rotation, and overwrite prevention.
 
-The command-line menu has also been smoke-tested. Automated unit tests do not verify every terminal's interactive password entry, drag-and-drop behavior, or alternate-screen cleanup; check those in your target terminal.
+Password masking, visible multiline input, legacy decryption, result-screen dismissal and menu exit have been exercised in an interactive Windows terminal with dummy data. Unit tests do not verify every terminal or drag-and-drop integration; check those in your target terminal. Windows and Unix/Android paths pass Clippy; Unix filesystem behavior has not been runtime-tested in this Windows workspace.
 
 | Source | Responsibility |
 | --- | --- |
@@ -215,3 +215,35 @@ The command-line menu has also been smoke-tested. Automated unit tests do not ve
 | `src/cryphase.rs` | Key derivation, encryption, decryption, and payload compatibility |
 | `src/notes.rs` | JSON note storage, validation, and file-path handling |
 | `src/files.rs` | Binary input, encrypted filename containers, and plaintext export |
+| `src/limits.rs` | Shared input, ciphertext, and JSON size limits |
+| `src/secure_fs.rs` | Handle-based file access and link/reparse-point rejection |
+
+
+### Filesystem hardening
+
+On Windows, the application opens each ancestor with reparse-point processing disabled, checks its metadata through the handle, and holds handles that deny write/delete sharing while resolving and accessing the child. File handles also prevent concurrent replacement. On Unix, it walks directories using `openat` with `O_DIRECTORY` and `O_NOFOLLOW`, then opens the final basename relative to the pinned parent descriptor. New output files use exclusive creation. Incomplete writes trigger best-effort removal through the file handle on Windows or pinned parent on Unix.
+
+Use a trusted working directory and appropriate folder permissions. These protections do not defend against administrators, malware already able to inspect the process, or an account that can read exported plaintext through inherited filesystem permissions. Removing an incomplete file is not secure disk erasure, and a crash or failed cleanup can leave partial output.
+
+
+### Dependency advisory checks
+
+The local audit tool can be installed inside the ignored build directory:
+
+```sh
+cargo install cargo-audit --locked --root target/audit-tools
+```
+
+On Windows, run:
+
+```powershell
+.\target\audit-tools\bin\cargo-audit.exe audit --db target/rustsec-db --file Cargo.lock
+```
+
+On Unix, run:
+
+```sh
+./target/audit-tools/bin/cargo-audit audit --db target/rustsec-db --file Cargo.lock
+```
+
+The security remediation run checked 78 locked dependencies against the RustSec database updated on 2026-11-21 and reported no known vulnerabilities or warnings. This is a point-in-time result, not a permanent guarantee; refresh the database and repeat the check when dependencies change.

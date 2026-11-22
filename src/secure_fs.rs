@@ -66,10 +66,21 @@ fn invalid_path() -> io::Error {
 
 fn absolute(path: &Path) -> io::Result<PathBuf> {
     // Check before normalization so a linked component followed by '..' cannot disappear.
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir) || c.as_os_str() == "..")
+    {
         return Err(invalid_path());
     }
     std::path::absolute(path)
+}
+
+pub fn open_directory(path: &Path) -> io::Result<SecureFile> {
+    open_impl(path, false, true)
+}
+
+fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
+    open_impl(path, create, false)
 }
 
 pub fn open_read(path: &Path) -> io::Result<SecureFile> {
@@ -90,7 +101,7 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
+fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFile> {
     use std::{
         fs::{self, OpenOptions},
         os::windows::{
@@ -157,7 +168,14 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
         current.push(name);
     }
     let mut options = OpenOptions::new();
-    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
     if create {
         // DELETE access permits removing an incomplete output through its own handle.
         options
@@ -167,10 +185,18 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
             .share_mode(0);
     } else {
         options.read(true).share_mode(FILE_SHARE_READ);
+        if directory {
+            options.access_mode(0x80);
+        }
     }
     let file = options.open(&current)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if (if directory {
+        !metadata.is_dir()
+    } else {
+        !metadata.is_file()
+    }) || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
         return Err(invalid_path());
     }
     Ok(SecureFile {
@@ -180,7 +206,7 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
 }
 
 #[cfg(unix)]
-fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
+fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFile> {
     use std::{
         ffi::CString,
         fs::OpenOptions,
@@ -241,6 +267,7 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
     let flags = libc::O_CLOEXEC
         | libc::O_NOFOLLOW
         | libc::O_NONBLOCK
+        | if directory { libc::O_DIRECTORY } else { 0 }
         | if create {
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
         } else {
@@ -255,7 +282,12 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
             0o600,
         )
     })?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if if directory {
+        !metadata.is_dir()
+    } else {
+        !metadata.is_file()
+    } {
         return Err(invalid_path());
     }
     Ok(SecureFile {
@@ -266,7 +298,7 @@ fn open(path: &Path, create: bool) -> io::Result<SecureFile> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open(_path: &Path, _create: bool) -> io::Result<SecureFile> {
+fn open_impl(_path: &Path, _create: bool, _directory: bool) -> io::Result<SecureFile> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Secure filesystem access is unavailable on this platform.",
@@ -309,6 +341,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(open_read(&link.join("source.bin")).is_err());
+        assert!(open_directory(&link).is_err());
         assert!(write_new(&link.join("leaked.bin"), b"secret").is_err());
         assert!(!real.join("leaked.bin").exists());
         assert!(absolute(Path::new("../blocked.bin")).is_err());
