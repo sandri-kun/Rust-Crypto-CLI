@@ -122,7 +122,7 @@ fn write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) 
         u128::from_le_bytes(random)
     ));
     let mut pending = PendingFile {
-        file: open(&temporary, true)?,
+        file: open(&temporary, true).map_err(|error| io::Error::new(error.kind(), format!("Could not create the staging file or its parent folder: {error}. Check folder permissions; on Termux use private home storage.")))?,
         cleanup: true,
     };
     write(&mut pending.file.file)?;
@@ -173,6 +173,36 @@ fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
     })
 }
 
+// Linux/Android search handles must not require listing protected ancestors such as /data.
+#[cfg(unix)]
+fn traversal_flags() -> libc::c_int {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = libc::O_PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = libc::O_RDONLY;
+    access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &File) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // O_PATH is valid for *at operations, but not fsync. Reopen only this directory
+    // through its pinned handle; no ancestor needs directory-listing permission.
+    // SAFETY: live directory fd, constant single-component C string, directory-only flags.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful openat returned a newly owned descriptor.
+    unsafe { File::from_raw_fd(fd) }.sync_all()
+}
+
 #[cfg(unix)]
 fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
     use std::{
@@ -182,8 +212,46 @@ fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
     let destination = CString::new(destination.file_name().ok_or_else(invalid_path)?.as_bytes())
         .map_err(|_| invalid_path())?;
     let parent = pending.file._parents.last().unwrap();
-    // SAFETY: both are single basenames relative to the same pinned directory.
-    // linkat fails with EEXIST, so publication is atomic without overwriting any target.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // RENAME_NOREPLACE (1) is an atomic rename that fails if the target exists.
+        // It also works on filesystems that do not support hard links.
+        // SAFETY: valid pinned fd and two NUL-terminated basenames; correct syscall ABI.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                pending.file.name.as_ptr(),
+                parent.as_raw_fd(),
+                destination.as_ptr(),
+                1u32,
+            )
+        };
+        if result == 0 {
+            pending.cleanup = false;
+            return sync_directory(parent).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Output committed, but directory synchronization failed: {error}"),
+                )
+            });
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        ) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "Atomic rename failed: {error}. In Termux, use a writable folder under your private home directory."
+                ),
+            ));
+        }
+    }
+    // Compatibility for older kernels and other Unix platforms. Never fall back
+    // to ordinary rename(), which could replace an existing destination.
+    // SAFETY: both basenames are relative to the same pinned directory.
     if unsafe {
         libc::linkat(
             parent.as_raw_fd(),
@@ -194,9 +262,15 @@ fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
         )
     } < 0
     {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "This folder does not allow atomic no-overwrite publication: {error}. Use private app storage in Termux."
+            ),
+        ));
     }
-    parent.sync_all().map_err(|error| {
+    sync_directory(parent).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!("Output committed, but directory synchronization failed: {error}"),
@@ -204,7 +278,7 @@ fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
     })?;
     pending.file.discard();
     pending.cleanup = false;
-    parent.sync_all()
+    sync_directory(parent)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -351,7 +425,7 @@ fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFil
     let name = component(name)?;
     let root = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(traversal_flags())
         .open("/")?;
     let mut parents = vec![root];
     for part in parts {
@@ -360,7 +434,7 @@ fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFil
         };
         let part = component(part)?;
         let parent = parents.last().unwrap().as_raw_fd();
-        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let flags = traversal_flags();
         // SAFETY: pinned parent fd, NUL-terminated child name, directory-only no-follow flags.
         let mut directory = owned(unsafe { libc::openat(parent, part.as_ptr(), flags) });
         if create
@@ -375,7 +449,7 @@ fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFil
                     return Err(error);
                 }
             }
-            parents.last().unwrap().sync_all()?;
+            sync_directory(parents.last().unwrap())?;
             directory = owned(unsafe { libc::openat(parent, part.as_ptr(), flags) });
         }
         parents.push(directory?);
@@ -435,6 +509,40 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn traverse_search_only_ancestor_without_requiring_directory_listing_permission() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = directory();
+        let ancestor = root.join("search-only");
+        let child = ancestor.join("owned");
+        fs::create_dir_all(&child).unwrap();
+        struct RestorePermissions(PathBuf);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+        let restore = RestorePermissions(ancestor.clone());
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o111)).unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(fs::read_dir(&ancestor).is_err());
+        }
+        let path = child.join("note.json");
+        write_new(&path, b"test JSON content").unwrap();
+        let mut read = open_read(&path).unwrap();
+        let mut bytes = Vec::new();
+        read.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"test JSON content");
+        assert!(write_new(&path, b"overwrite").is_err());
+        drop(read);
+        drop(restore);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(child).unwrap();
+        fs::remove_dir(ancestor).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]

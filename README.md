@@ -281,3 +281,21 @@ The security remediation run checked 78 locked dependencies against the RustSec 
 ## Security checks before release
 
 See [SECURITY.md](SECURITY.md) for the threat model, batch integrity rules, panic/cleanup behavior and remaining release-owner responsibilities. The release profile uses unwinding so ordinary panics run cleanup guards. `.github/workflows/security.yml` runs release tests and builds on Windows and Linux, plus advisory checks. The workflow has read-only repository permissions and pins its checkout action. It does not publish artifacts, sign binaries or prove resistance to real power loss.
+
+
+## Termux / Android storage
+
+Keep the project and output in Termux private home storage (`$HOME`) and rebuild after updating the source:
+
+```sh
+cd "$HOME/seedcrypt"
+cargo run --release
+```
+
+Adjust the project directory name if needed. `secret_notes/` is created relative to the working directory when you save a note.
+
+Android ancestors such as `/data` can allow traversal to your application directory without allowing their contents to be listed. Linux/Android traversal therefore uses `O_PATH` handles and keeps no-follow checks, instead of requiring directory read permission on every ancestor. The output folder itself must still be writable and support the required synchronization operations.
+
+Atomic publication on Linux/Android prefers `renameat2(RENAME_NOREPLACE)`, so saving does not always require hard-link support. If neither safe publication method is supported, the application reports an error rather than overwriting a file. Android shared storage (`/sdcard`, `/storage/emulated/0`, SD cards) may have different permissions and filesystem restrictions. Granting Android storage access does not ensure atomic operations are supported; use private home storage for the supported workflow.
+
+If a save still fails, check `pwd -P` and retain the complete new error message. An error containing `Output committed` means a final file may already exist despite a synchronization failure; inspect it before retrying.
