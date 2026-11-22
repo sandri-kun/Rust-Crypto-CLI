@@ -25,7 +25,7 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
     let mut output = io::stdout();
     write!(output, "{prompt}")?;
     output.flush()?;
-    let mut password = Zeroizing::new(String::with_capacity(128));
+    let mut password = Zeroizing::new(Vec::<u8>::with_capacity(128));
     let result = loop {
         let Event::Key(key) = event::read()? else {
             continue;
@@ -34,7 +34,10 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
             continue;
         }
         match key.code {
-            KeyCode::Enter => break Ok(password),
+            KeyCode::Enter => {
+                let text = std::str::from_utf8(&password).expect("password contains valid UTF-8");
+                break Ok(Zeroizing::new(text.to_owned()));
+            }
             KeyCode::Esc => {
                 break Err(io::Error::new(
                     io::ErrorKind::Interrupted,
@@ -48,10 +51,14 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
                 ));
             }
             KeyCode::Backspace => {
-                if let Some((index, _)) = password.char_indices().next_back() {
+                if let Some((index, _)) = std::str::from_utf8(&password)
+                    .expect("password contains valid UTF-8")
+                    .char_indices()
+                    .next_back()
+                {
                     // Wipe removed UTF-8 bytes too, rather than leaving them after truncation.
-                    let removed = Zeroizing::new(password.split_off(index));
-                    drop(removed);
+                    password[index..].zeroize();
+                    password.truncate(index);
                     write!(output, "\x08 \x08")?;
                 }
             }
@@ -63,11 +70,12 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
             {
                 // Grow into a guarded allocation so the previous allocation is wiped.
                 if password.len() + character.len_utf8() > password.capacity() {
-                    let mut larger = Zeroizing::new(String::with_capacity(password.capacity() * 2));
-                    larger.push_str(&password);
+                    let mut larger = Zeroizing::new(Vec::with_capacity(password.capacity() * 2));
+                    larger.extend_from_slice(&password);
                     password = larger;
                 }
-                password.push(character);
+                let mut encoded = Zeroizing::new([0u8; 4]);
+                password.extend_from_slice(character.encode_utf8(&mut *encoded).as_bytes());
                 character.zeroize();
                 write!(output, "*")?;
             }

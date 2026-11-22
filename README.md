@@ -13,7 +13,7 @@ This tool implements modern, industry-standard cryptographic primitives to ensur
 * **Authenticated Encryption:** Uses **AES-256-GCM** to provide both confidentiality and integrity protection against tampering.
 * **Key Derivation:** Defaults to **Argon2id v1.3** (64 MiB, 3 iterations, 1 lane, 32-byte key). **PBKDF2-HMAC-SHA256** (600,000 iterations) remains available. Both derive keys for AES-256-GCM; Argon2 is not itself the encryption cipher.
 * **Randomness:** Generates unique, cryptographically secure 16-byte **Salts** and 12-byte **Nonces** for every encryption operation using `getrandom`.
-* **Memory Cleanup:** Uses `Zeroizing` guards for passwords, plaintext, derived keys, decrypted output, and Argon2 working memory, including error paths. Enables zeroization features for AES/GHASH internals. Password entry is hidden. Cleanup cannot guarantee erasure of OS swap, crash dumps, terminal history, compiler temporaries, or data after forced process termination.
+* **Memory Cleanup:** Uses `Zeroizing` guards for passwords, plaintext, derived keys, decrypted output, and Argon2 working memory, including error paths. Enables zeroization features for AES/GHASH internals. Password entry displays one `*` per Unicode character. Backspace removes the last character; Enter submits, and Esc or Ctrl+C cancels. The number of stars reveals password length. Cleanup cannot guarantee erasure of OS swap, crash dumps, terminal history, compiler temporaries, or data after forced process termination.
 
 ---
 
