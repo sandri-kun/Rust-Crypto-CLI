@@ -268,6 +268,25 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), json);
+        // Password rotation preserves the source and migrates a legacy note.
+        let legacy = "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKC9dXGW9MgtR/TgTT96LHt4EJwQCxqqBKwMSbHN+DLQrV1u7BLg==";
+        let old_plaintext = crate::cryphase::decrypt(legacy, b"password").unwrap();
+        let rotated =
+            crate::cryphase::encrypt(old_plaintext.as_str(), b"new password", Kdf::Argon2id)
+                .unwrap();
+        drop(old_plaintext);
+        let new_path = save(&directory, "rotated", &rotated, Kdf::Argon2id).unwrap();
+        let new_ciphertext = load(&directory, "rotated").unwrap();
+        assert_eq!(
+            crate::cryphase::decrypt(&new_ciphertext, b"new password")
+                .unwrap()
+                .as_str(),
+            "legacy compatibility"
+        );
+        assert!(crate::cryphase::decrypt(&new_ciphertext, b"password").is_err());
+        assert!(crate::cryphase::decrypt(legacy, b"password").is_ok());
+        assert_eq!(fs::read_to_string(&path).unwrap(), json);
+        fs::remove_file(new_path).unwrap();
         assert!(save(&directory, "wrong", &ciphertext, Kdf::Pbkdf2).is_err());
         for invalid in [
             "not JSON".to_owned(),

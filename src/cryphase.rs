@@ -54,6 +54,10 @@ fn derive_key(password: &[u8], salt: &[u8], kdf: Kdf) -> Result<Zeroizing<[u8; 3
 }
 
 pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, String> {
+    encrypt_bytes(plain_text.as_bytes(), password, kdf)
+}
+
+pub fn encrypt_bytes(plaintext: &[u8], password: &[u8], kdf: Kdf) -> Result<String, String> {
     if password.is_empty() {
         return Err("[error] Password cannot be empty.".to_string());
     }
@@ -67,8 +71,8 @@ pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, St
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "Cipher init error")?;
     drop(key);
     // Reserve the GCM tag before copying plaintext, avoiding sensitive reallocations.
-    let mut ciphertext = Zeroizing::new(Vec::with_capacity(plain_text.len() + 16));
-    ciphertext.extend_from_slice(plain_text.as_bytes());
+    let mut ciphertext = Zeroizing::new(Vec::with_capacity(plaintext.len() + 16));
+    ciphertext.extend_from_slice(plaintext);
     cipher
         .encrypt_in_place(&Nonce::from(nonce), &header, &mut *ciphertext)
         .map_err(|_| "Encryption failed.")?;
@@ -83,7 +87,7 @@ fn decrypt_payload(
     password: &[u8],
     kdf: Kdf,
     aad: &[u8],
-) -> Result<SecretText, String> {
+) -> Result<Zeroizing<Vec<u8>>, String> {
     if payload.len() < 44 {
         return Err(FAILURE.to_string());
     }
@@ -98,10 +102,17 @@ fn decrypt_payload(
             &mut *plaintext,
         )
         .map_err(|_| FAILURE.to_string())?;
-    SecretText::from_bytes(plaintext)
+    Ok(plaintext)
 }
 
 pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
+    SecretText::from_bytes(decrypt_bytes(encrypted_base64, password)?)
+}
+
+pub fn decrypt_bytes(
+    encrypted_base64: &str,
+    password: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let payload = BASE64
         .decode(encrypted_base64)
         .map_err(|_| "Invalid Base64 data.")?;

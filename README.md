@@ -57,3 +57,25 @@ Enter the note password to decrypt, then press Enter to clear the result. The sa
 ## Terminal interface
 
 The CLI uses English labels, consistent section headings, numbered options, and `[ok]`, `[info]`, and `[error]` status messages. The ASCII layout works without color or special fonts. Existing menu numbers are preserved. End-of-input at the main menu exits cleanly. This presentation update does not imply security certification or an independent audit.
+
+
+## Multiline and masked secret input
+
+Encryption offers four input modes: single line visible (default), multiline visible, single line masked, and multiline masked. Masked input displays `*` characters instead of the secret. Backspace removes the last character; Esc or Ctrl+C cancels masked input. Visible input is echoed by the terminal.
+
+For multiline input, enter `.end` on its own line to finish. Enter `..end` to include a literal `.end` line. Spaces and blank lines are preserved, lines are joined with LF, and the terminator is excluded. A final empty content line preserves a trailing LF. End-of-input during visible entry cancels the operation rather than encrypting partial content.
+
+## Change password / Re-encrypt note
+
+Choose menu `[6] Change password / Re-encrypt note`. Type or drop the source JSON path, enter its current password, then enter and confirm the new password. The source is authenticated before requesting the new password. Plaintext is never displayed or written to disk during this operation and remains in its zeroizing buffer until re-encryption completes.
+
+The output uses Argon2id (64 MiB, 3 iterations, one lane) and AES-256-GCM with fresh random salt and nonce. Choose `Save encrypted note as JSON` and enter a new filename to persist the change. Existing files are never overwritten. Cancelling without saving discards the new ciphertext. The original file and any older copies still accept the old password; creating a new note does not revoke access to those copies.
+
+
+## Encrypt files with drag and drop
+
+Choose `[7] Encrypt file / Drag and drop`, drop one source file into the path prompt (or type its path), and press Enter. Files up to 8 MiB are supported, including PDFs, images, archives, text, and empty files. Directories and symlinks are rejected. Enter and confirm a password, then choose to save the result as JSON in `secret_notes/`. The source is never changed or deleted. Encryption uses Argon2id and AES-256-GCM with fresh random salt and nonce. File contents are read as bytes, not converted to text.
+
+Choose `[8] Decrypt file / Export original bytes`, provide the encrypted JSON path and password, then enter an output filename including the extension you want. The original filename, extension, timestamps, permissions, and directory structure are not stored. Only the file contents are restored, byte for byte. Outputs are written unencrypted to `decrypted_files/`, which is ignored by Git; existing files are never overwritten. On Unix, newly exported files are created with mode 0600. On Windows, access follows the destination folder permissions. Authentication must succeed before any plaintext file is created. RAM buffers are zeroized when finished or cancelled; this does not erase source or exported files from disk.
+
+Menu 6 also supports changing the password of encrypted binary files. Use menu 8 to export their contents; the text viewer requires valid UTF-8. Existing text notes and legacy ciphertext remain supported. The 8 MiB input cap keeps Base64 JSON output within the existing 16 MiB JSON read limit. This implementation loads each file into RAM and does not provide streaming encryption.

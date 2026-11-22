@@ -101,6 +101,9 @@ pub fn run() {
         println!("  [2] Decrypt Base64 text");
         println!("  [4] Browse saved notes");
         println!("  [5] Open JSON file / Drag and drop");
+        println!("  [6] Change password / Re-encrypt note");
+        println!("  [7] Encrypt file / Drag and drop");
+        println!("  [8] Decrypt file / Export original bytes");
         println!();
         println!("  [3] Exit");
         println!("  ----------------------------------------");
@@ -123,6 +126,9 @@ pub fn run() {
             "2" => decrypt_menu(),
             "4" => read_note_menu(),
             "5" => dropped_note_menu(),
+            "6" => reencrypt_menu(),
+            "7" => file_menu(true),
+            "8" => file_menu(false),
             "3" => {
                 println!("\nGoodbye.");
                 break;
@@ -181,30 +187,13 @@ fn encrypt_menu() {
         "ENCRYPT TEXT",
         "Create an encrypted note. Confirm your password to continue.",
     );
-    let password = match password_prompt("  Password: ") {
+    let password = match confirmed_password() {
         Ok(password) => password,
         Err(error) => {
-            println!("[error] Could not read password: {error}");
+            println!("[error] {error}");
             return;
         }
     };
-    if password.is_empty() {
-        println!("[error] Password cannot be empty.");
-        return;
-    }
-    let confirmation = match password_prompt("  Confirm password: ") {
-        Ok(password) => password,
-        Err(error) => {
-            println!("[error] Could not read confirmation: {error}");
-            return;
-        }
-    };
-    let matches = password.as_slice() == confirmation.as_slice();
-    drop(confirmation);
-    if !matches {
-        println!("[error] Passwords do not match. Encryption cancelled.");
-        return;
-    }
     println!("  [1] Argon2id       Recommended / 64 MiB memory");
     println!("  [2] PBKDF2-SHA256  600,000 iterations");
     let selection = input_prompt("  Key derivation [1]: ");
@@ -216,9 +205,21 @@ fn encrypt_menu() {
             return;
         }
     };
-    let text = input_prompt("  Secret text: ");
+    let text = match secret_input() {
+        Ok(text) => text,
+        Err(error) => {
+            println!("[error] Could not read secret text: {error}");
+            return;
+        }
+    };
 
-    let result = run_with_loading("  Encrypting", || cryphase::encrypt(&text, &password, kdf));
+    let result = run_with_loading("  Encrypting", || {
+        cryphase::encrypt(
+            std::str::from_utf8(&text).expect("valid UTF-8 input"),
+            &password,
+            kdf,
+        )
+    });
     drop(password);
     drop(text);
 
@@ -406,5 +407,299 @@ fn show_decrypted(decrypted: cryphase::SecretText) -> io::Result<()> {
                 return Ok(());
             }
         }
+    }
+}
+
+fn confirmed_password() -> io::Result<Zeroizing<Vec<u8>>> {
+    let password = password_prompt("  New password: ")?;
+    if password.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Password cannot be empty.",
+        ));
+    }
+    let confirmation = password_prompt("  Confirm new password: ")?;
+    let matches = password.as_slice() == confirmation.as_slice();
+    drop(confirmation);
+    if !matches {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Passwords do not match. Operation cancelled.",
+        ));
+    }
+    Ok(password)
+}
+
+fn append_secret(buffer: &mut Zeroizing<Vec<u8>>, bytes: &[u8]) {
+    if buffer.len() + bytes.len() > buffer.capacity() {
+        let mut larger = Zeroizing::new(Vec::with_capacity(
+            (buffer.len() + bytes.len()).max(buffer.capacity().saturating_mul(2)),
+        ));
+        larger.extend_from_slice(buffer);
+        *buffer = larger;
+    }
+    buffer.extend_from_slice(bytes);
+}
+
+fn secret_input() -> io::Result<Zeroizing<Vec<u8>>> {
+    println!("\n  [1] Single line / visible");
+    println!("  [2] Multiple lines / visible");
+    println!("  [3] Single line / masked");
+    println!("  [4] Multiple lines / masked");
+    let selection = input_prompt("  Input mode [1]: ");
+    let (multiline, masked) = match selection.trim() {
+        "" | "1" => (false, false),
+        "2" => (true, false),
+        "3" => (false, true),
+        "4" => (true, true),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid input mode.",
+            ));
+        }
+    };
+    if multiline {
+        println!("  Enter .end on its own line to finish. Use ..end for a literal .end line.");
+        println!("  Lines are joined with LF; spaces and blank lines are preserved.");
+    }
+    let mut text = Zeroizing::new(Vec::with_capacity(128));
+    let mut first = true;
+    loop {
+        let line = if masked {
+            password_prompt("  Secret text: ")?
+        } else {
+            print!("  > ");
+            io::stdout().flush()?;
+            let mut line = Zeroizing::new(String::new());
+            if io::stdin().read_line(&mut line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Input ended. Operation cancelled.",
+                ));
+            }
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            Zeroizing::new(line.as_bytes().to_vec())
+        };
+        if finish_input_line(&mut text, &mut first, &line, multiline) {
+            break;
+        }
+    }
+    Ok(text)
+}
+
+fn reencrypt_menu() {
+    section(
+        "CHANGE PASSWORD / RE-ENCRYPT NOTE",
+        "The original file is preserved. Save the result under a new filename.",
+    );
+    println!("  Drop a JSON note here, or enter its path (for example secret_notes/note.json).");
+    let input = input_prompt("  File path (Enter to cancel): ");
+    if input.trim().is_empty() {
+        return;
+    }
+    let ciphertext =
+        match crate::notes::dropped_path(&input).and_then(|path| crate::notes::load_path(&path)) {
+            Ok(ciphertext) => ciphertext,
+            Err(error) => {
+                println!("[error] Could not open note: {error}");
+                return;
+            }
+        };
+    let old_password = match password_prompt("  Current password: ") {
+        Ok(password) => password,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    let result = run_with_loading("  Authenticating note", || {
+        cryphase::decrypt_bytes(&ciphertext, &old_password)
+    });
+    drop(old_password);
+    let plaintext = match result {
+        Ok(plaintext) => plaintext,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    let new_password = match confirmed_password() {
+        Ok(password) => password,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    println!("  The new note will use Argon2id (64 MiB, 3 iterations).");
+    let result = run_with_loading("  Re-encrypting", || {
+        cryphase::encrypt_bytes(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+    });
+    drop(plaintext);
+    drop(new_password);
+    match result {
+        Ok(encrypted) => {
+            println!("[ok] Re-encryption complete. Save the new note below.");
+            println!("[info] The original note still accepts its original password.");
+            save_encrypted_menu(&encrypted, cryphase::Kdf::Argon2id);
+        }
+        Err(error) => println!("[error] Re-encryption failed: {error}"),
+    }
+}
+
+fn finish_input_line(
+    text: &mut Zeroizing<Vec<u8>>,
+    first: &mut bool,
+    line: &[u8],
+    multiline: bool,
+) -> bool {
+    if multiline && line == b".end" {
+        return true;
+    }
+    if !*first {
+        append_secret(text, b"\n");
+    }
+    append_secret(
+        text,
+        if multiline && line == b"..end" {
+            b".end"
+        } else {
+            line
+        },
+    );
+    *first = false;
+    !multiline
+}
+
+fn file_menu(encrypting: bool) {
+    section(
+        if encrypting {
+            "ENCRYPT FILE"
+        } else {
+            "DECRYPT FILE"
+        },
+        if encrypting {
+            "Encrypt any regular file up to 8 MiB. The source is preserved."
+        } else {
+            "Restore original bytes from an encrypted JSON note."
+        },
+    );
+    println!("  Drag and drop one file, or paste its path.");
+    let input = input_prompt("  File path (Enter to cancel): ");
+    if input.trim().is_empty() {
+        return;
+    }
+    let path = match crate::notes::dropped_path(&input) {
+        Ok(path) => path,
+        Err(error) => {
+            println!("[error] {error}");
+            return;
+        }
+    };
+    if encrypting {
+        let source = match crate::files::read_source(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                println!("[error] Could not read file: {error}");
+                return;
+            }
+        };
+        let password = match confirmed_password() {
+            Ok(password) => password,
+            Err(error) => {
+                println!("[error] {error}");
+                return;
+            }
+        };
+        let result = run_with_loading("  Encrypting file", || {
+            cryphase::encrypt_bytes(&source, &password, cryphase::Kdf::Argon2id)
+        });
+        drop(source);
+        drop(password);
+        match result {
+            Ok(encrypted) => {
+                println!("[ok] File encrypted with Argon2id and AES-256-GCM.");
+                println!("[info] Save the encrypted JSON below. Restore it using menu 8.");
+                save_encrypted_menu(&encrypted, cryphase::Kdf::Argon2id);
+            }
+            Err(error) => println!("[error] Encryption failed: {error}"),
+        }
+    } else {
+        let ciphertext = match crate::notes::load_path(&path) {
+            Ok(ciphertext) => ciphertext,
+            Err(error) => {
+                println!("[error] Could not read encrypted file: {error}");
+                return;
+            }
+        };
+        let password = match password_prompt("  Password: ") {
+            Ok(password) => password,
+            Err(error) => {
+                println!("[error] {error}");
+                return;
+            }
+        };
+        let result = run_with_loading("  Decrypting file", || {
+            cryphase::decrypt_bytes(&ciphertext, &password)
+        });
+        drop(password);
+        let plaintext = match result {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                println!("[error] {error}");
+                return;
+            }
+        };
+        println!("[info] Export writes unencrypted data to decrypted_files/.");
+        println!(
+            "  Enter an output filename including its original extension (for example restored.pdf)."
+        );
+        loop {
+            let name = input_prompt("  Output filename (Enter to cancel): ");
+            if name.trim().is_empty() {
+                return;
+            }
+            match crate::files::export(
+                std::path::Path::new("decrypted_files"),
+                name.trim(),
+                &plaintext,
+            ) {
+                Ok(path) => {
+                    drop(plaintext);
+                    println!("[ok] Restored file: {}", path.display());
+                    return;
+                }
+                Err(error) => println!("[error] Could not export file: {error}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiline_preserves_spaces_blank_lines_and_escaped_terminator() {
+        let mut text = Zeroizing::new(Vec::new());
+        let mut first = true;
+        for line in ["  first  ", "", "??", "..end", ""] {
+            assert!(!finish_input_line(
+                &mut text,
+                &mut first,
+                line.as_bytes(),
+                true
+            ));
+        }
+        assert!(finish_input_line(&mut text, &mut first, b".end", true));
+        assert_eq!(&*text, "  first  \n\n??\n.end\n".as_bytes());
+        let mut single = Zeroizing::new(Vec::new());
+        assert!(finish_input_line(&mut single, &mut true, b".end", false));
+        assert_eq!(&*single, b".end");
     }
 }
