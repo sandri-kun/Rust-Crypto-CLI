@@ -1,7 +1,12 @@
 use crate::cryphase;
 use crossterm::{
+    cursor::MoveTo,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled},
+    execute,
+    terminal::{
+        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+        enable_raw_mode, is_raw_mode_enabled,
+    },
 };
 use std::io::{self, Write};
 use zeroize::{Zeroize, Zeroizing};
@@ -165,6 +170,23 @@ fn encrypt_menu() {
             return;
         }
     };
+    if password.is_empty() {
+        println!("Password tidak boleh kosong!");
+        return;
+    }
+    let confirmation = match password_prompt("Ulangi password: ") {
+        Ok(password) => password,
+        Err(error) => {
+            println!("Gagal membaca konfirmasi: {error}");
+            return;
+        }
+    };
+    let matches = password.as_slice() == confirmation.as_slice();
+    drop(confirmation);
+    if !matches {
+        println!("Password tidak sama. Enkripsi dibatalkan.");
+        return;
+    }
     println!("1. Argon2id (default, memori 64 MiB)");
     println!("2. PBKDF2-SHA256 (600.000 iterasi)");
     let selection = input_prompt("Pilih derivasi kunci (1/2, Enter = 1): ");
@@ -211,9 +233,59 @@ fn decrypt_menu() {
 
     match result {
         Ok(decrypted) => {
-            println!("\nHasil Dekripsi:");
-            println!("{}", decrypted.as_str());
+            if let Err(error) = show_decrypted(decrypted) {
+                println!("Gagal menampilkan atau membersihkan hasil: {error}");
+            }
         }
         Err(e) => println!("Gagal melakukan dekripsi: {:?}", e),
+    }
+}
+
+struct DecryptionScreen;
+
+impl Drop for DecryptionScreen {
+    fn drop(&mut self) {
+        // Clear while still on the alternate screen, then restore the menu screen.
+        let _ = execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0));
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+fn show_decrypted(decrypted: cryphase::SecretText) -> io::Result<()> {
+    let mut output = io::stdout();
+    execute!(output, EnterAlternateScreen)?;
+    let _screen = DecryptionScreen;
+    execute!(output, Clear(ClearType::All), MoveTo(0, 0))?;
+    writeln!(output, "Hasil Dekripsi:\n")?;
+    // Render control characters safely so plaintext cannot inject terminal commands.
+    for character in decrypted.as_str().chars() {
+        if character.is_control() && character != '\n' {
+            write!(output, "{}", character.escape_default())?;
+        } else {
+            write!(output, "{character}")?;
+        }
+    }
+    // The terminal has the visible result; the plaintext buffer is no longer needed.
+    drop(decrypted);
+    writeln!(
+        output,
+        "\n\nTekan Enter untuk membersihkan hasil dekripsi..."
+    )?;
+    output.flush()?;
+    let restore = !is_raw_mode_enabled()?;
+    enable_raw_mode()?;
+    let _terminal = PasswordTerminal { restore };
+    loop {
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Release {
+                continue;
+            }
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc)
+                || (matches!(key.code, KeyCode::Char('c' | 'C'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                return Ok(());
+            }
+        }
     }
 }
