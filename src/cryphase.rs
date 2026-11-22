@@ -1,10 +1,10 @@
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{AeadInPlace, KeyInit},
+    aead::{AeadInOut, KeyInit},
 };
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use getrandom::getrandom;
+use getrandom::fill;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -44,15 +44,15 @@ pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, St
     }
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 12];
-    getrandom(&mut salt).map_err(|e| format!("Random salt error: {e}"))?;
-    getrandom(&mut nonce).map_err(|e| format!("Random nonce error: {e}"))?;
+    fill(&mut salt).map_err(|e| format!("Random salt error: {e}"))?;
+    fill(&mut nonce).map_err(|e| format!("Random nonce error: {e}"))?;
     let mut header = MAGIC.to_vec();
     header.extend_from_slice(&[VERSION, kdf as u8]);
     let key = derive_key(password, &salt, kdf)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "Cipher init error")?;
     let mut ciphertext = Zeroizing::new(plain_text.as_bytes().to_vec());
     cipher
-        .encrypt_in_place(Nonce::from_slice(&nonce), &header, &mut *ciphertext)
+        .encrypt_in_place(&Nonce::from(nonce), &header, &mut *ciphertext)
         .map_err(|_| "Gagal melakukan enkripsi!")?;
     header.extend_from_slice(&salt);
     header.extend_from_slice(&nonce);
@@ -73,7 +73,11 @@ fn decrypt_payload(
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| FAILURE)?;
     let mut plaintext = Zeroizing::new(payload[28..].to_vec());
     cipher
-        .decrypt_in_place(Nonce::from_slice(&payload[16..28]), aad, &mut *plaintext)
+        .decrypt_in_place(
+            &Nonce::try_from(&payload[16..28]).map_err(|_| FAILURE)?,
+            aad,
+            &mut *plaintext,
+        )
         .map_err(|_| FAILURE.to_string())?;
     // Keep the byte buffer guarded even when UTF-8 validation fails.
     let text = std::str::from_utf8(&plaintext).map_err(|_| "Plaintext bukan UTF-8 valid")?;
@@ -111,13 +115,33 @@ pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<Zeroizing<Stri
 mod tests {
     use super::*;
 
+    #[test]
+    fn independent_compatibility_vectors() {
+        // Generated independently with Python cryptography (AESGCM/Argon2id)
+        // and hashlib.pbkdf2_hmac, salt 0..15, nonce 0..11, password "password".
+        // Fixed vectors catch changes that a same-implementation roundtrip misses.
+        let vectors = [
+            (
+                "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKC9dXGW9MgtR/TgTT96LHt4EJwQCxqqBKwMSbHN+DLQrV1u7BLg==",
+                "legacy compatibility",
+            ),
+            (
+                "U0VFRENSWVBUAQIAAQIDBAUGBwgJCgsMDQ4PAAECAwQFBgcICQoLDoQcBoQobSEuxGz8NFn9i+hoSlb6s/o12Rb/ljICf8UTCM3B",
+                "argon2 compatibility",
+            ),
+        ];
+        for (ciphertext, expected) in vectors {
+            assert_eq!(decrypt(ciphertext, b"password").unwrap().as_str(), expected);
+        }
+    }
+
     fn legacy(text: &[u8], salt: [u8; 16]) -> String {
         let key = derive_key(b"password", &salt, Kdf::Pbkdf2).unwrap();
         let cipher = Aes256Gcm::new_from_slice(&*key).unwrap();
         let nonce = [7u8; 12];
         let mut data = text.to_vec();
         cipher
-            .encrypt_in_place(Nonce::from_slice(&nonce), &[], &mut data)
+            .encrypt_in_place(&Nonce::from(nonce), &[], &mut data)
             .unwrap();
         let mut payload = salt.to_vec();
         payload.extend_from_slice(&nonce);
