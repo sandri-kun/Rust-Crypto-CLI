@@ -9,6 +9,21 @@ use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+/// Valid UTF-8 backed by the original guarded decryption buffer.
+/// Intentionally does not implement Clone, Debug, or Display.
+pub struct SecretText(Zeroizing<Vec<u8>>);
+
+impl SecretText {
+    fn from_bytes(bytes: Zeroizing<Vec<u8>>) -> Result<Self, String> {
+        std::str::from_utf8(&bytes).map_err(|_| "Plaintext bukan UTF-8 valid")?;
+        Ok(Self(bytes))
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("SecretText contains validated UTF-8")
+    }
+}
+
 const ITERATIONS: u32 = 600_000;
 const MAGIC: &[u8] = b"SEEDCRYPT";
 const VERSION: u8 = 1;
@@ -50,7 +65,10 @@ pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, St
     header.extend_from_slice(&[VERSION, kdf as u8]);
     let key = derive_key(password, &salt, kdf)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "Cipher init error")?;
-    let mut ciphertext = Zeroizing::new(plain_text.as_bytes().to_vec());
+    drop(key);
+    // Reserve the GCM tag before copying plaintext, avoiding sensitive reallocations.
+    let mut ciphertext = Zeroizing::new(Vec::with_capacity(plain_text.len() + 16));
+    ciphertext.extend_from_slice(plain_text.as_bytes());
     cipher
         .encrypt_in_place(&Nonce::from(nonce), &header, &mut *ciphertext)
         .map_err(|_| "Gagal melakukan enkripsi!")?;
@@ -65,12 +83,13 @@ fn decrypt_payload(
     password: &[u8],
     kdf: Kdf,
     aad: &[u8],
-) -> Result<Zeroizing<String>, String> {
+) -> Result<SecretText, String> {
     if payload.len() < 44 {
         return Err(FAILURE.to_string());
     }
     let key = derive_key(password, &payload[..16], kdf)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| FAILURE)?;
+    drop(key);
     let mut plaintext = Zeroizing::new(payload[28..].to_vec());
     cipher
         .decrypt_in_place(
@@ -79,12 +98,10 @@ fn decrypt_payload(
             &mut *plaintext,
         )
         .map_err(|_| FAILURE.to_string())?;
-    // Keep the byte buffer guarded even when UTF-8 validation fails.
-    let text = std::str::from_utf8(&plaintext).map_err(|_| "Plaintext bukan UTF-8 valid")?;
-    Ok(Zeroizing::new(text.to_owned()))
+    SecretText::from_bytes(plaintext)
 }
 
-pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<Zeroizing<String>, String> {
+pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
     let payload = BASE64
         .decode(encrypted_base64)
         .map_err(|_| "Base64 tidak valid")?;
@@ -114,6 +131,18 @@ pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<Zeroizing<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_text_preserves_allocation_and_validates_utf8() {
+        let bytes = Zeroizing::new("rahasia 🌱".as_bytes().to_vec());
+        let original_pointer = bytes.as_ptr();
+        let original_capacity = bytes.capacity();
+        let text = SecretText::from_bytes(bytes).unwrap();
+        assert_eq!(text.as_str(), "rahasia 🌱");
+        assert_eq!(text.as_str().as_ptr(), original_pointer);
+        assert_eq!(text.0.capacity(), original_capacity);
+        assert!(SecretText::from_bytes(Zeroizing::new(vec![0xff])).is_err());
+    }
 
     #[test]
     fn independent_compatibility_vectors() {
@@ -154,7 +183,7 @@ mod tests {
         for kdf in [Kdf::Pbkdf2, Kdf::Argon2id] {
             for text in ["", "rahasia 🌱\nbaris dua"] {
                 let encrypted = encrypt(text, b"password", kdf).unwrap();
-                assert_eq!(&**decrypt(&encrypted, b"password").unwrap(), text);
+                assert_eq!(decrypt(&encrypted, b"password").unwrap().as_str(), text);
             }
             let encrypted = encrypt("secret", b"password", kdf).unwrap();
             assert!(decrypt(&encrypted, b"wrong").is_err());
@@ -181,7 +210,9 @@ mod tests {
             salt[MAGIC.len()] = VERSION;
             salt[MAGIC.len() + 1] = id;
             assert_eq!(
-                &**decrypt(&legacy(b"old secret", salt), b"password").unwrap(),
+                decrypt(&legacy(b"old secret", salt), b"password")
+                    .unwrap()
+                    .as_str(),
                 "old secret"
             );
         }

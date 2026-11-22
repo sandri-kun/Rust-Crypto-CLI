@@ -18,7 +18,7 @@ impl Drop for PasswordTerminal {
     }
 }
 
-fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
+fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
     let restore = !is_raw_mode_enabled()?;
     enable_raw_mode()?;
     let terminal = PasswordTerminal { restore };
@@ -35,8 +35,7 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<String>> {
         }
         match key.code {
             KeyCode::Enter => {
-                let text = std::str::from_utf8(&password).expect("password contains valid UTF-8");
-                break Ok(Zeroizing::new(text.to_owned()));
+                break Ok(password);
             }
             KeyCode::Esc => {
                 break Err(io::Error::new(
@@ -180,7 +179,7 @@ fn encrypt_menu() {
     let text = input_prompt("Masukkan teks rahasia: ");
 
     let result = run_with_loading("Sedang mengenkripsi", || {
-        cryphase::encrypt(&text, password.as_bytes(), kdf)
+        cryphase::encrypt(&text, &password, kdf)
     });
     drop(password);
     drop(text);
@@ -206,7 +205,7 @@ fn decrypt_menu() {
     let encrypted_text = input_prompt("Masukkan teks terenkripsi (Base64): ");
 
     let result = run_with_loading("Sedang mendekripsi", || {
-        cryphase::decrypt(encrypted_text.trim(), password.as_bytes())
+        cryphase::decrypt(encrypted_text.trim(), &password)
     });
     drop(password);
 
