@@ -58,6 +58,29 @@ pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, St
 }
 
 pub fn encrypt_bytes(plaintext: &[u8], password: &[u8], kdf: Kdf) -> Result<String, String> {
+    encrypt_versioned(plaintext, password, kdf, VERSION)
+}
+
+pub fn encrypt_file_container(
+    plaintext: &[u8],
+    password: &[u8],
+    kdf: Kdf,
+) -> Result<String, String> {
+    encrypt_versioned(plaintext, password, kdf, 2)
+}
+
+pub fn is_file_container(ciphertext: &str) -> bool {
+    BASE64
+        .decode(ciphertext)
+        .is_ok_and(|bytes| bytes.starts_with(b"SEEDCRYPT\x02"))
+}
+
+fn encrypt_versioned(
+    plaintext: &[u8],
+    password: &[u8],
+    kdf: Kdf,
+    version: u8,
+) -> Result<String, String> {
     if password.is_empty() {
         return Err("[error] Password cannot be empty.".to_string());
     }
@@ -66,7 +89,7 @@ pub fn encrypt_bytes(plaintext: &[u8], password: &[u8], kdf: Kdf) -> Result<Stri
     fill(&mut salt).map_err(|e| format!("Random salt error: {e}"))?;
     fill(&mut nonce).map_err(|e| format!("Random nonce error: {e}"))?;
     let mut header = MAGIC.to_vec();
-    header.extend_from_slice(&[VERSION, kdf as u8]);
+    header.extend_from_slice(&[version, kdf as u8]);
     let key = derive_key(password, &salt, kdf)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "Cipher init error")?;
     drop(key);
@@ -106,7 +129,11 @@ fn decrypt_payload(
 }
 
 pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
-    SecretText::from_bytes(decrypt_bytes(encrypted_base64, password)?)
+    let plaintext = decrypt_bytes(encrypted_base64, password)?;
+    if is_file_container(encrypted_base64) {
+        return Err("This note contains a file. Use menu 8 to restore it.".to_string());
+    }
+    SecretText::from_bytes(plaintext)
 }
 
 pub fn decrypt_bytes(
@@ -119,8 +146,8 @@ pub fn decrypt_bytes(
     let header_len = MAGIC.len() + 2;
     if payload.starts_with(MAGIC) && payload.len() >= header_len {
         let kdf = match (payload[MAGIC.len()], payload[MAGIC.len() + 1]) {
-            (VERSION, 1) => Some(Kdf::Pbkdf2),
-            (VERSION, 2) => Some(Kdf::Argon2id),
+            (1 | 2, 1) => Some(Kdf::Pbkdf2),
+            (1 | 2, 2) => Some(Kdf::Argon2id),
             _ => None,
         };
         if let Some(kdf) = kdf

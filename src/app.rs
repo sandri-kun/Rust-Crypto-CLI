@@ -538,7 +538,11 @@ fn reencrypt_menu() {
     };
     println!("  The new note will use Argon2id (64 MiB, 3 iterations).");
     let result = run_with_loading("  Re-encrypting", || {
-        cryphase::encrypt_bytes(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+        if cryphase::is_file_container(&ciphertext) {
+            cryphase::encrypt_file_container(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+        } else {
+            cryphase::encrypt_bytes(&plaintext, &new_password, cryphase::Kdf::Argon2id)
+        }
     });
     drop(plaintext);
     drop(new_password);
@@ -602,13 +606,41 @@ fn file_menu(encrypting: bool) {
         }
     };
     if encrypting {
-        let source = match crate::files::read_source(&path) {
+        let mut source = match crate::files::read_source(&path) {
             Ok(source) => source,
             Err(error) => {
                 println!("[error] Could not read file: {error}");
                 return;
             }
         };
+        let remember = loop {
+            let choice = input_prompt("  Remember original filename inside encryption? [y/N]: ");
+            match choice.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => break true,
+                "" | "n" | "no" => break false,
+                _ => println!("[error] Enter y or n."),
+            }
+        };
+        if remember {
+            let packed = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Original filename is not valid UTF-8.",
+                    )
+                })
+                .and_then(|name| crate::files::pack(&source, name));
+            source = match packed {
+                Ok(packed) => packed,
+                Err(error) => {
+                    println!("[error] Cannot store original filename: {error}");
+                    println!("[info] Try again without remembering the original filename.");
+                    return;
+                }
+            };
+        }
         let password = match confirmed_password() {
             Ok(password) => password,
             Err(error) => {
@@ -617,7 +649,11 @@ fn file_menu(encrypting: bool) {
             }
         };
         let result = run_with_loading("  Encrypting file", || {
-            cryphase::encrypt_bytes(&source, &password, cryphase::Kdf::Argon2id)
+            if remember {
+                cryphase::encrypt_file_container(&source, &password, cryphase::Kdf::Argon2id)
+            } else {
+                cryphase::encrypt_bytes(&source, &password, cryphase::Kdf::Argon2id)
+            }
         });
         drop(source);
         drop(password);
@@ -655,19 +691,40 @@ fn file_menu(encrypting: bool) {
                 return;
             }
         };
+        let (original_name, file_bytes) = if cryphase::is_file_container(&ciphertext) {
+            match crate::files::unpack(&plaintext) {
+                Ok((name, bytes)) => (Some(name), bytes),
+                Err(error) => {
+                    println!("[error] {error}");
+                    return;
+                }
+            }
+        } else {
+            (None, plaintext.as_slice())
+        };
         println!("[info] Export writes unencrypted data to decrypted_files/.");
-        println!(
-            "  Enter an output filename including its original extension (for example restored.pdf)."
-        );
+        println!("  Type /cancel to cancel. Existing files are never overwritten.");
         loop {
-            let name = input_prompt("  Output filename (Enter to cancel): ");
-            if name.trim().is_empty() {
+            let name = if let Some(original_name) = original_name {
+                input_prompt(&format!("  Output filename [{original_name}]: "))
+            } else {
+                input_prompt("  Output filename with extension (Enter to cancel): ")
+            };
+            if name.trim() == "/cancel" {
                 return;
             }
+            let selected_name = if name.trim().is_empty() {
+                match original_name {
+                    Some(name) => name,
+                    None => return,
+                }
+            } else {
+                name.trim()
+            };
             match crate::files::export(
                 std::path::Path::new("decrypted_files"),
-                name.trim(),
-                &plaintext,
+                selected_name,
+                file_bytes,
             ) {
                 Ok(path) => {
                     drop(plaintext);

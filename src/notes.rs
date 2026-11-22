@@ -148,7 +148,8 @@ pub fn save(directory: &Path, name: &str, ciphertext: &str, kdf: Kdf) -> io::Res
     // Only canonical Base64 and fixed metadata enter JSON, so no user text can inject fields.
     let bytes = BASE64.decode(ciphertext).map_err(io::Error::other)?;
     let id = kdf as u8;
-    if !bytes.starts_with(b"SEEDCRYPT\x01")
+    if !bytes.starts_with(b"SEEDCRYPT")
+        || !matches!(bytes.get(9), Some(1 | 2))
         || bytes.get(10) != Some(&id)
         || bytes.len() < 55
         || BASE64.encode(&bytes) != ciphertext
@@ -164,8 +165,9 @@ pub fn save(directory: &Path, name: &str, ciphertext: &str, kdf: Kdf) -> io::Res
         }
         Kdf::Pbkdf2 => r#"{"name":"PBKDF2-HMAC-SHA256","iterations":600000,"key_bytes":32}"#,
     };
+    let payload_version = bytes[9];
     let json = format!(
-        "{{\n  \"schema\": \"seedcrypt-note\",\n  \"schema_version\": 1,\n  \"payload_version\": 1,\n  \"cipher\": \"AES-256-GCM\",\n  \"encoding\": \"base64\",\n  \"kdf\": {kdf_json},\n  \"ciphertext\": \"{ciphertext}\"\n}}\n"
+        "{{\n  \"schema\": \"seedcrypt-note\",\n  \"schema_version\": 1,\n  \"payload_version\": {payload_version},\n  \"cipher\": \"AES-256-GCM\",\n  \"encoding\": \"base64\",\n  \"kdf\": {kdf_json},\n  \"ciphertext\": \"{ciphertext}\"\n}}\n"
     );
     fs::create_dir_all(directory)?;
     let path = directory.join(filename);

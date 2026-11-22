@@ -34,15 +34,21 @@ pub fn read_source(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 
-fn validate_name(name: &str) -> io::Result<()> {
-    let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+pub fn validate_name(name: &str) -> io::Result<()> {
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
     if name.is_empty()
-        || name.len() > 120
+        || name.len() > 240
         || name.starts_with('.')
         || name.ends_with('.')
-        || !name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_'))
+        || name.ends_with(' ')
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')
+        })
         || matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (base.len() == 4
             && (base.starts_with("COM") || base.starts_with("LPT"))
@@ -50,10 +56,41 @@ fn validate_name(name: &str) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Use a filename with ASCII letters, digits, dots, hyphens or underscores; no folders or reserved device names.",
+            "Use a filename up to 240 UTF-8 bytes; no paths, reserved device names, control characters or Windows-invalid characters.",
         ));
     }
     Ok(())
+}
+
+/// Version 2 authenticated file content: [name length: u16 LE][UTF-8 name][file bytes].
+/// Called only when the authenticated ciphertext header selects a file container.
+pub fn pack(bytes: &[u8], name: &str) -> io::Result<Zeroizing<Vec<u8>>> {
+    validate_name(name)?;
+    let mut packed = Zeroizing::new(Vec::with_capacity(2 + name.len() + bytes.len()));
+    packed.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    packed.extend_from_slice(name.as_bytes());
+    packed.extend_from_slice(bytes);
+    Ok(packed)
+}
+
+pub fn unpack(bytes: &[u8]) -> io::Result<(&str, &[u8])> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid encrypted file metadata.",
+        )
+    };
+    let length = u16::from_le_bytes(
+        bytes
+            .get(..2)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    ) as usize;
+    let name = std::str::from_utf8(bytes.get(2..2 + length).ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
+    validate_name(name)?;
+    Ok((name, &bytes[2 + length..]))
 }
 
 pub fn export(directory: &Path, name: &str, plaintext: &[u8]) -> io::Result<PathBuf> {
@@ -83,6 +120,48 @@ mod tests {
     use crate::cryphase::{self, Kdf};
 
     #[test]
+    fn encrypted_filename_roundtrip_and_password_rotation() {
+        let file_bytes = b"\x00\xff\x01file contents";
+        let packed = pack(file_bytes, "My document 01.pdf").unwrap();
+        let encrypted =
+            cryphase::encrypt_file_container(&packed, b"old password", Kdf::Argon2id).unwrap();
+        assert!(cryphase::is_file_container(&encrypted));
+        let plaintext = cryphase::decrypt_bytes(&encrypted, b"old password").unwrap();
+        let (name, bytes) = unpack(&plaintext).unwrap();
+        assert_eq!(name, "My document 01.pdf");
+        assert_eq!(bytes, file_bytes);
+        assert!(cryphase::decrypt_bytes(&encrypted, b"wrong").is_err());
+        let rotated =
+            cryphase::encrypt_file_container(&plaintext, b"new password", Kdf::Argon2id).unwrap();
+        let restored = cryphase::decrypt_bytes(&rotated, b"new password").unwrap();
+        assert_eq!(unpack(&restored).unwrap(), (name, file_bytes.as_slice()));
+        assert!(cryphase::decrypt_bytes(&rotated, b"old password").is_err());
+        let mut raw =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encrypted).unwrap();
+        raw[9] = 1;
+        let tampered = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
+        assert!(cryphase::decrypt_bytes(&tampered, b"old password").is_err());
+        // Arbitrary legacy bytes must never be mistaken for a new file container.
+        let legacy = cryphase::encrypt_bytes(&packed, b"password", Kdf::Argon2id).unwrap();
+        assert!(!cryphase::is_file_container(&legacy));
+        assert_eq!(
+            &*cryphase::decrypt_bytes(&legacy, b"password").unwrap(),
+            &*packed
+        );
+        for malformed in [
+            &b""[..],
+            &b"\xff\xffshort"[..],
+            &b"\x01\x00\xff"[..],
+            &b"\x04\x00../x"[..],
+        ] {
+            assert!(unpack(malformed).is_err());
+        }
+        assert!(pack(b"", "CON .txt").is_err());
+        let empty = pack(b"", "empty.txt").unwrap();
+        assert_eq!(unpack(&empty).unwrap(), ("empty.txt", &b""[..]));
+    }
+
+    #[test]
     fn binary_file_roundtrip_and_no_overwrite() {
         let mut id = [0; 16];
         getrandom::fill(&mut id).unwrap();
@@ -96,6 +175,24 @@ mod tests {
         let encrypted = cryphase::encrypt_bytes(&source, b"password", Kdf::Argon2id).unwrap();
         let note = crate::notes::save(&dir, "encrypted", &encrypted, Kdf::Argon2id).unwrap();
         let loaded = crate::notes::load_path(&note).unwrap();
+        let named = pack(&bytes, "original.bin").unwrap();
+        let named_encrypted =
+            cryphase::encrypt_file_container(&named, b"password", Kdf::Argon2id).unwrap();
+        let named_path =
+            crate::notes::save(&dir, "named", &named_encrypted, Kdf::Argon2id).unwrap();
+        assert_eq!(
+            crate::notes::load_path(&named_path).unwrap(),
+            named_encrypted
+        );
+        let named_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&named_path).unwrap()).unwrap();
+        assert_eq!(named_json["payload_version"], 2);
+        assert!(
+            !fs::read_to_string(&named_path)
+                .unwrap()
+                .contains("original.bin")
+        );
+        fs::remove_file(named_path).unwrap();
         assert!(cryphase::decrypt_bytes(&loaded, b"wrong").is_err());
         assert!(cryphase::decrypt(&loaded, b"password").is_err());
         let decrypted = cryphase::decrypt_bytes(&loaded, b"password").unwrap();
