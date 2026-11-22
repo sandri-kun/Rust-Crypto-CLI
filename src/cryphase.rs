@@ -15,7 +15,7 @@ pub struct SecretText(Zeroizing<Vec<u8>>);
 
 impl SecretText {
     fn from_bytes(bytes: Zeroizing<Vec<u8>>) -> Result<Self, String> {
-        std::str::from_utf8(&bytes).map_err(|_| "Plaintext bukan UTF-8 valid")?;
+        std::str::from_utf8(&bytes).map_err(|_| "Decrypted text is not valid UTF-8.")?;
         Ok(Self(bytes))
     }
 
@@ -28,7 +28,7 @@ const ITERATIONS: u32 = 600_000;
 const MAGIC: &[u8] = b"SEEDCRYPT";
 const VERSION: u8 = 1;
 const ARGON_MEMORY_KIB: u32 = 65_536;
-const FAILURE: &str = "Dekripsi GAGAL! Password salah atau data dirusak.";
+const FAILURE: &str = "Decryption failed. Incorrect password or damaged data.";
 
 #[derive(Clone, Copy)]
 pub enum Kdf {
@@ -43,11 +43,11 @@ fn derive_key(password: &[u8], salt: &[u8], kdf: Kdf) -> Result<Zeroizing<[u8; 3
         Kdf::Argon2id => {
             // Parameters belong to format version 1; never change them in place.
             let params = Params::new(ARGON_MEMORY_KIB, 3, 1, Some(32))
-                .map_err(|_| "Parameter Argon2 tidak valid".to_string())?;
+                .map_err(|_| "Invalid Argon2 parameters.".to_string())?;
             let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
             Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
                 .hash_password_into_with_memory(password, salt, &mut *key, &mut *memory)
-                .map_err(|_| "Gagal menurunkan kunci Argon2".to_string())?;
+                .map_err(|_| "Argon2 key derivation failed.".to_string())?;
         }
     }
     Ok(key)
@@ -55,7 +55,7 @@ fn derive_key(password: &[u8], salt: &[u8], kdf: Kdf) -> Result<Zeroizing<[u8; 3
 
 pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, String> {
     if password.is_empty() {
-        return Err("Password tidak boleh kosong!".to_string());
+        return Err("[error] Password cannot be empty.".to_string());
     }
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 12];
@@ -71,7 +71,7 @@ pub fn encrypt(plain_text: &str, password: &[u8], kdf: Kdf) -> Result<String, St
     ciphertext.extend_from_slice(plain_text.as_bytes());
     cipher
         .encrypt_in_place(&Nonce::from(nonce), &header, &mut *ciphertext)
-        .map_err(|_| "Gagal melakukan enkripsi!")?;
+        .map_err(|_| "Encryption failed.")?;
     header.extend_from_slice(&salt);
     header.extend_from_slice(&nonce);
     header.extend_from_slice(&ciphertext);
@@ -104,7 +104,7 @@ fn decrypt_payload(
 pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
     let payload = BASE64
         .decode(encrypted_base64)
-        .map_err(|_| "Base64 tidak valid")?;
+        .map_err(|_| "Invalid Base64 data.")?;
     let header_len = MAGIC.len() + 2;
     if payload.starts_with(MAGIC) && payload.len() >= header_len {
         let kdf = match (payload[MAGIC.len()], payload[MAGIC.len() + 1]) {

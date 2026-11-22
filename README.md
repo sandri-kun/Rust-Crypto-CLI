@@ -36,3 +36,24 @@ Decryption automatically reads metadata and also supports the original `salt | n
 Run `cargo run --release`, select encryption, then press Enter for Argon2id or choose PBKDF2. Decryption requires no algorithm selection. Plaintext leading/trailing spaces are preserved; only the input line ending is removed.
 
 Validation: `cargo test --release` and `cargo clippy --all-targets -- -D warnings`.
+
+
+## Save encrypted notes
+
+After encryption, choose `[1] Save encrypted note as JSON` and enter a filename such as `wallet_backup` or `wallet_backup.json`. Files are saved relative to the working directory under `secret_notes/`. Existing files are never overwritten. Names accept 1?100 ASCII letters, numbers, hyphens, or underscores, with an optional `.json` extension; paths and Windows device names are rejected. The directory is excluded by `.gitignore`.
+
+JSON stores only ciphertext and non-secret format metadata: schema/version, AES-256-GCM, Base64 encoding, and KDF parameters. No password, plaintext, preview, or password hash is saved. Choose a filename that does not reveal sensitive details. Public metadata does not require secrecy, but ciphertext can still be attacked offline if someone obtains the file and the password is weak.
+
+To decrypt a saved note, choose main menu `[4] Browse saved notes`, select a numbered JSON file, and enter its password. Press Enter to cancel file selection or to clear the decrypted result. Missing or empty folders are handled without creating files. Only regular files with supported filenames are listed; JSON reads are limited to 16 MiB. The manual Base64 decrypt prompt remains available. Descriptive JSON metadata is not authenticated; decryption relies on the authenticated header inside the ciphertext, not the external JSON fields.
+
+
+## Open a dropped JSON file
+
+Choose menu `[5] Open JSON file / Drag and drop`, drag one JSON note into the terminal at the path prompt, then press Enter. You can also type or paste its path. Paths containing spaces and paths wrapped in matching single or double quotes are supported, including files outside `secret_notes/`. Enter on an empty prompt cancels. The path is opened as a file and never executed as a shell command.
+
+Enter the note password to decrypt, then press Enter to clear the result. The same JSON validation and 16 MiB limit apply. Drag-and-drop must be supported by your terminal; pasting a path remains available otherwise.
+
+
+## Terminal interface
+
+The CLI uses English labels, consistent section headings, numbered options, and `[ok]`, `[info]`, and `[error]` status messages. The ASCII layout works without color or special fonts. Existing menu numbers are preserved. End-of-input at the main menu exits cleanly. This presentation update does not imply security certification or an independent audit.

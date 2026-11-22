@@ -45,13 +45,13 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
             KeyCode::Esc => {
                 break Err(io::Error::new(
                     io::ErrorKind::Interrupted,
-                    "Input dibatalkan",
+                    "Input cancelled.",
                 ));
             }
             KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 break Err(io::Error::new(
                     io::ErrorKind::Interrupted,
-                    "Input dibatalkan",
+                    "Input cancelled.",
                 ));
             }
             KeyCode::Backspace => {
@@ -94,25 +94,40 @@ fn password_prompt(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
 
 pub fn run() {
     loop {
-        println!("\n=== SEEDCRYPT MENU ===");
-        println!("1. Enkripsi Teks");
-        println!("2. Dekripsi Teks");
-        println!("3. Keluar");
-        print!("Pilih menu (1/2/3): ");
+        println!("\n  SEEDCRYPT  v{}", env!("CARGO_PKG_VERSION"));
+        println!("  Private notes / Local encryption");
+        println!("  ----------------------------------------");
+        println!("  [1] Encrypt text");
+        println!("  [2] Decrypt Base64 text");
+        println!("  [4] Browse saved notes");
+        println!("  [5] Open JSON file / Drag and drop");
+        println!();
+        println!("  [3] Exit");
+        println!("  ----------------------------------------");
+        print!("  Select an option: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
-        io::stdin().read_line(&mut choice).unwrap();
+        match io::stdin().read_line(&mut choice) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("[error] Could not read input: {error}");
+                break;
+            }
+        }
         let choice = choice.trim();
 
         match choice {
             "1" => encrypt_menu(),
             "2" => decrypt_menu(),
+            "4" => read_note_menu(),
+            "5" => dropped_note_menu(),
             "3" => {
-                println!("Keluar dari aplikasi...");
+                println!("\nGoodbye.");
                 break;
             }
-            _ => println!("Pilihan tidak valid!"),
+            _ => println!("[error] Invalid selection. Choose one of the listed options."),
         }
     }
 }
@@ -162,82 +177,183 @@ where
 }
 
 fn encrypt_menu() {
-    println!("\n--- ENKRIPSI ---");
-    let password = match password_prompt("Masukkan password: ") {
+    section(
+        "ENCRYPT TEXT",
+        "Create an encrypted note. Confirm your password to continue.",
+    );
+    let password = match password_prompt("  Password: ") {
         Ok(password) => password,
         Err(error) => {
-            println!("Gagal membaca password: {error}");
+            println!("[error] Could not read password: {error}");
             return;
         }
     };
     if password.is_empty() {
-        println!("Password tidak boleh kosong!");
+        println!("[error] Password cannot be empty.");
         return;
     }
-    let confirmation = match password_prompt("Ulangi password: ") {
+    let confirmation = match password_prompt("  Confirm password: ") {
         Ok(password) => password,
         Err(error) => {
-            println!("Gagal membaca konfirmasi: {error}");
+            println!("[error] Could not read confirmation: {error}");
             return;
         }
     };
     let matches = password.as_slice() == confirmation.as_slice();
     drop(confirmation);
     if !matches {
-        println!("Password tidak sama. Enkripsi dibatalkan.");
+        println!("[error] Passwords do not match. Encryption cancelled.");
         return;
     }
-    println!("1. Argon2id (default, memori 64 MiB)");
-    println!("2. PBKDF2-SHA256 (600.000 iterasi)");
-    let selection = input_prompt("Pilih derivasi kunci (1/2, Enter = 1): ");
+    println!("  [1] Argon2id       Recommended / 64 MiB memory");
+    println!("  [2] PBKDF2-SHA256  600,000 iterations");
+    let selection = input_prompt("  Key derivation [1]: ");
     let kdf = match selection.trim() {
         "" | "1" => cryphase::Kdf::Argon2id,
         "2" => cryphase::Kdf::Pbkdf2,
         _ => {
-            println!("Pilihan tidak valid!");
+            println!("[error] Invalid selection. Choose one of the listed options.");
             return;
         }
     };
-    let text = input_prompt("Masukkan teks rahasia: ");
+    let text = input_prompt("  Secret text: ");
 
-    let result = run_with_loading("Sedang mengenkripsi", || {
-        cryphase::encrypt(&text, &password, kdf)
-    });
+    let result = run_with_loading("  Encrypting", || cryphase::encrypt(&text, &password, kdf));
     drop(password);
     drop(text);
 
     match result {
         Ok(encrypted) => {
-            println!("\nHasil Enkripsi (Base64):");
+            println!("\n[ok] Encryption complete.\n\nCiphertext / Base64\n-------------------");
             println!("{}", encrypted);
+            save_encrypted_menu(&encrypted, kdf);
         }
-        Err(e) => println!("Gagal melakukan enkripsi: {:?}", e),
+        Err(e) => println!("[error] Encryption failed: {}", e),
+    }
+}
+
+fn save_encrypted_menu(encrypted: &str, kdf: cryphase::Kdf) {
+    loop {
+        println!("\n  [1] Save encrypted note as JSON");
+        println!("  [2] Back to main menu");
+        let choice = input_prompt("  Select [2]: ");
+        match choice.trim() {
+            "1" => {
+                let name = input_prompt("  Filename (no folders; Enter to cancel): ");
+                if name.trim().is_empty() {
+                    continue;
+                }
+                match crate::notes::save(
+                    std::path::Path::new("secret_notes"),
+                    name.trim(),
+                    encrypted,
+                    kdf,
+                ) {
+                    Ok(path) => {
+                        println!("[ok] Saved to {}", path.display());
+                        return;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        println!("[error] File already exists. Choose a different name.");
+                    }
+                    Err(error) => println!("[error] Could not save note: {error}"),
+                }
+            }
+            "" | "2" => return,
+            _ => println!("[error] Invalid selection. Choose one of the listed options."),
+        }
     }
 }
 
 fn decrypt_menu() {
-    println!("\n--- DEKRIPSI ---");
-    let password = match password_prompt("Masukkan password: ") {
-        Ok(password) => password,
+    section("DECRYPT TEXT", "Paste your Base64 ciphertext below.");
+    let encrypted_text = input_prompt("  Ciphertext / Base64: ");
+    decrypt_text(encrypted_text.trim());
+}
+
+fn read_note_menu() {
+    let directory = std::path::Path::new("secret_notes");
+    let names = match crate::notes::list(directory) {
+        Ok(names) => names,
         Err(error) => {
-            println!("Gagal membaca password: {error}");
+            println!("[error] Could not read notes folder: {error}");
             return;
         }
     };
-    let encrypted_text = input_prompt("Masukkan teks terenkripsi (Base64): ");
+    if names.is_empty() {
+        println!("[info] No JSON notes found in secret_notes/.");
+        return;
+    }
+    section("SAVED NOTES", "Location: secret_notes/");
+    for (index, name) in names.iter().enumerate() {
+        println!("  [{}] {}", index + 1, name);
+    }
+    let selection = input_prompt("  Note number (Enter to cancel): ");
+    if selection.trim().is_empty() {
+        return;
+    }
+    let selected = selection
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| names.get(index));
+    let Some(name) = selected else {
+        println!("[error] Invalid selection. Choose one of the listed options.");
+        return;
+    };
+    match crate::notes::load(directory, name) {
+        Ok(ciphertext) => decrypt_text(&ciphertext),
+        Err(error) => println!("[error] Could not read note: {error}"),
+    }
+}
 
-    let result = run_with_loading("Sedang mendekripsi", || {
-        cryphase::decrypt(encrypted_text.trim(), &password)
+fn dropped_note_menu() {
+    section(
+        "OPEN JSON NOTE",
+        "Open an encrypted note from your computer.",
+    );
+    println!(
+        "\n  Drop one JSON note into the terminal, then press Enter.\n  You can also paste or type its path."
+    );
+    let input = input_prompt("  File path (Enter to cancel): ");
+    if input.trim().is_empty() {
+        return;
+    }
+    let result = crate::notes::dropped_path(&input).and_then(|path| crate::notes::load_path(&path));
+    match result {
+        Ok(ciphertext) => decrypt_text(&ciphertext),
+        Err(error) => println!("[error] Could not open note: {error}"),
+    }
+}
+
+fn section(title: &str, description: &str) {
+    println!("\n  {title}");
+    println!("  ----------------------------------------");
+    println!("  {description}\n");
+}
+
+fn decrypt_text(encrypted_text: &str) {
+    let password = match password_prompt("  Password: ") {
+        Ok(password) => password,
+        Err(error) => {
+            println!("[error] Could not read password: {error}");
+            return;
+        }
+    };
+
+    let result = run_with_loading("  Decrypting", || {
+        cryphase::decrypt(encrypted_text, &password)
     });
     drop(password);
 
     match result {
         Ok(decrypted) => {
             if let Err(error) = show_decrypted(decrypted) {
-                println!("Gagal menampilkan atau membersihkan hasil: {error}");
+                println!("[error] Could not display or clear result: {error}");
             }
         }
-        Err(e) => println!("Gagal melakukan dekripsi: {:?}", e),
+        Err(e) => println!("[error] Decryption failed: {}", e),
     }
 }
 
@@ -256,7 +372,10 @@ fn show_decrypted(decrypted: cryphase::SecretText) -> io::Result<()> {
     execute!(output, EnterAlternateScreen)?;
     let _screen = DecryptionScreen;
     execute!(output, Clear(ClearType::All), MoveTo(0, 0))?;
-    writeln!(output, "Hasil Dekripsi:\n")?;
+    writeln!(
+        output,
+        "DECRYPTED NOTE\n----------------------------------------\n"
+    )?;
     // Render control characters safely so plaintext cannot inject terminal commands.
     for character in decrypted.as_str().chars() {
         if character.is_control() && character != '\n' {
@@ -269,7 +388,7 @@ fn show_decrypted(decrypted: cryphase::SecretText) -> io::Result<()> {
     drop(decrypted);
     writeln!(
         output,
-        "\n\nTekan Enter untuk membersihkan hasil dekripsi..."
+        "\n\n----------------------------------------\nPress Enter to clear this result and return."
     )?;
     output.flush()?;
     let restore = !is_raw_mode_enabled()?;
