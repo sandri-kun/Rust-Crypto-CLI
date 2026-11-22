@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+aes = { version = "0.8", features = ["zeroize"] }
+ghash = { version = "0.5", features = ["zeroize"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
+rpassword = "7"
 pbkdf2 = "0.12"
 sha2 = "0.10"
 base64 = "0.22"

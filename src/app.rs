@@ -1,5 +1,6 @@
-use std::io::{self, Write};
 use crate::cryphase;
+use std::io::{self, Write};
+use zeroize::Zeroizing;
 
 pub fn run() {
     loop {
@@ -26,12 +27,15 @@ pub fn run() {
     }
 }
 
-fn input_prompt(prompt: &str) -> String {
+fn input_prompt(prompt: &str) -> Zeroizing<String> {
     print!("{}", prompt);
     io::stdout().flush().unwrap();
-    let mut input = String::new();
+    let mut input = Zeroizing::new(String::new());
     io::stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
+    while input.ends_with(['\r', '\n']) {
+        input.pop();
+    }
+    input
 }
 
 fn run_with_loading<F, R>(loading_message: &str, task: F) -> R
@@ -47,7 +51,7 @@ where
     thread::scope(|s| {
         let msg = loading_message.to_string();
         let running_ref = &running;
-        
+
         s.spawn(move || {
             let spinner_chars = ['|', '/', '-', '\\'];
             let mut i = 0;
@@ -69,12 +73,31 @@ where
 
 fn encrypt_menu() {
     println!("\n--- ENKRIPSI ---");
-    let password = input_prompt("Masukkan password: ");
+    let password = match rpassword::prompt_password("Masukkan password: ") {
+        Ok(password) => Zeroizing::new(password),
+        Err(error) => {
+            println!("Gagal membaca password: {error}");
+            return;
+        }
+    };
+    println!("1. Argon2id (default, memori 64 MiB)");
+    println!("2. PBKDF2-SHA256 (600.000 iterasi)");
+    let selection = input_prompt("Pilih derivasi kunci (1/2, Enter = 1): ");
+    let kdf = match selection.trim() {
+        "" | "1" => cryphase::Kdf::Argon2id,
+        "2" => cryphase::Kdf::Pbkdf2,
+        _ => {
+            println!("Pilihan tidak valid!");
+            return;
+        }
+    };
     let text = input_prompt("Masukkan teks rahasia: ");
 
     let result = run_with_loading("Sedang mengenkripsi", || {
-        cryphase::encrypt(&text, password.as_bytes())
+        cryphase::encrypt(&text, password.as_bytes(), kdf)
     });
+    drop(password);
+    drop(text);
 
     match result {
         Ok(encrypted) => {
@@ -87,17 +110,24 @@ fn encrypt_menu() {
 
 fn decrypt_menu() {
     println!("\n--- DEKRIPSI ---");
-    let password = input_prompt("Masukkan password: ");
+    let password = match rpassword::prompt_password("Masukkan password: ") {
+        Ok(password) => Zeroizing::new(password),
+        Err(error) => {
+            println!("Gagal membaca password: {error}");
+            return;
+        }
+    };
     let encrypted_text = input_prompt("Masukkan teks terenkripsi (Base64): ");
 
     let result = run_with_loading("Sedang mendekripsi", || {
-        cryphase::decrypt(&encrypted_text, password.as_bytes())
+        cryphase::decrypt(encrypted_text.trim(), password.as_bytes())
     });
+    drop(password);
 
     match result {
         Ok(decrypted) => {
             println!("\nHasil Dekripsi:");
-            println!("{}", decrypted);
+            println!("{}", decrypted.as_str());
         }
         Err(e) => println!("Gagal melakukan dekripsi: {:?}", e),
     }

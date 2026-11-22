@@ -11,9 +11,9 @@
 This tool implements modern, industry-standard cryptographic primitives to ensure your sensitive data remains protected:
 
 * **Authenticated Encryption:** Uses **AES-256-GCM** to provide both confidentiality and integrity protection against tampering.
-* **Key Derivation:** Employs **PBKDF2-HMAC-SHA256** with a high iteration count (`600,000`) to harden user passwords against brute-force attacks.
+* **Key Derivation:** Defaults to **Argon2id v1.3** (64 MiB, 3 iterations, 1 lane, 32-byte key). **PBKDF2-HMAC-SHA256** (600,000 iterations) remains available. Both derive keys for AES-256-GCM; Argon2 is not itself the encryption cipher.
 * **Randomness:** Generates unique, cryptographically secure 16-byte **Salts** and 12-byte **Nonces** for every encryption operation using `getrandom`.
-* **Memory Safety:** Automatically wipes derived cryptographic keys from RAM immediately after use utilizing the `zeroize` crate.
+* **Memory Cleanup:** Uses `Zeroizing` guards for passwords, plaintext, derived keys, decrypted output, and Argon2 working memory, including error paths. Enables zeroization features for AES/GHASH internals. Password entry is hidden. Cleanup cannot guarantee erasure of OS swap, crash dumps, terminal history, compiler temporaries, or data after forced process termination.
 
 ---
 
@@ -21,3 +21,18 @@ This tool implements modern, industry-standard cryptographic primitives to ensur
 
 ### Prerequisites
 Make sure you have Rust and Cargo installed on your system. If not, get it from [rustup.rs](https://rustup.rs/).
+
+
+## Ciphertext format and compatibility
+
+New encryption outputs standard Base64 over:
+
+`SEEDCRYPT (9 bytes) | version 0x01 | KDF ID | salt (16 bytes) | nonce (12 bytes) | ciphertext | GCM tag (16 bytes)`
+
+KDF `0x01` selects PBKDF2; `0x02` selects Argon2id. The magic, version, and KDF ID are authenticated as GCM additional data. Parameters above are fixed for version 1; future parameter changes require a new format version. Each encryption generates fresh salt and nonce.
+
+Decryption automatically reads metadata and also supports the original `salt | nonce | ciphertext | tag` PBKDF2 format. It tries authenticated legacy decryption if new-format parsing or authentication fails, including the rare case where an old random salt matches the new marker. Unknown metadata cannot successfully decrypt unless the entire input is independently valid legacy ciphertext. Older application versions cannot decrypt the new format, including new PBKDF2 outputs.
+
+Run `cargo run --release`, select encryption, then press Enter for Argon2id or choose PBKDF2. Decryption requires no algorithm selection. Plaintext leading/trailing spaces are preserved; only the input line ending is removed.
+
+Validation: `cargo test --release` and `cargo clippy --all-targets -- -D warnings`.
