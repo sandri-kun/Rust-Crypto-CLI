@@ -351,16 +351,28 @@ mod tests {
         fs::write(source.join("two.txt"), b"two").unwrap();
         let plan = prepare(&source, Mode::Encrypt).unwrap();
         assert!(
-            run(&plan, &encrypted, b"password", true, |_, _, _| true)
-                .error
-                .is_none()
+            run(
+                &plan,
+                &encrypted,
+                b"test passphrase for batch",
+                true,
+                |_, _, _| true
+            )
+            .error
+            .is_none()
         );
         drop(plan);
         let member_path = encrypted.join("note_0001.json");
         let original_member = fs::read(&member_path).unwrap();
         fs::remove_file(&member_path).unwrap();
         let plan = prepare(&encrypted, Mode::Decrypt).unwrap();
-        let result = run(&plan, &output, b"password", false, |_, _, _| true);
+        let result = run(
+            &plan,
+            &output,
+            b"test passphrase for batch",
+            false,
+            |_, _, _| true,
+        );
         assert!(result.error.is_some());
         assert_eq!(result.succeeded, 0);
         assert!(!output.exists());
@@ -370,9 +382,15 @@ mod tests {
         fs::copy(encrypted.join("note_0002.json"), &member_path).unwrap();
         let plan = prepare(&encrypted, Mode::Decrypt).unwrap();
         assert!(
-            run(&plan, &output, b"password", false, |_, _, _| true)
-                .error
-                .is_some()
+            run(
+                &plan,
+                &output,
+                b"test passphrase for batch",
+                false,
+                |_, _, _| true
+            )
+            .error
+            .is_some()
         );
         assert!(!output.exists());
         drop(plan);
@@ -382,28 +400,52 @@ mod tests {
         fs::write(&manifest_path, b"invalid JSON").unwrap();
         let plan = prepare(&encrypted, Mode::Decrypt).unwrap();
         assert!(
-            run(&plan, &output, b"password", false, |_, _, _| true)
-                .error
-                .is_some()
+            run(
+                &plan,
+                &output,
+                b"test passphrase for batch",
+                false,
+                |_, _, _| true
+            )
+            .error
+            .is_some()
         );
         assert!(!output.exists());
         drop(plan);
         fs::remove_file(&manifest_path).unwrap();
         let mut plan = prepare(&encrypted, Mode::Decrypt).unwrap();
         assert!(
-            run(&plan, &output, b"password", false, |_, _, _| true)
-                .error
-                .is_some()
+            run(
+                &plan,
+                &output,
+                b"test passphrase for batch",
+                false,
+                |_, _, _| true
+            )
+            .error
+            .is_some()
         );
         // Explicit legacy consent must not downgrade bound batch members to ordinary files.
         plan.allow_legacy = true;
-        let result = run(&plan, &output, b"password", false, |_, _, _| true);
+        let result = run(
+            &plan,
+            &output,
+            b"test passphrase for batch",
+            false,
+            |_, _, _| true,
+        );
         assert_eq!((result.succeeded, result.failed), (0, 2));
         assert!(!output.exists());
         drop(plan);
         fs::write(&manifest_path, original_manifest).unwrap();
         let plan = prepare(&encrypted, Mode::Decrypt).unwrap();
-        let result = run(&plan, &output, b"password", false, |_, _, _| true);
+        let result = run(
+            &plan,
+            &output,
+            b"test passphrase for batch",
+            false,
+            |_, _, _| true,
+        );
         assert!(result.verified);
         assert_eq!(result.succeeded, 2);
         drop(plan);
@@ -433,22 +475,25 @@ mod tests {
         ));
         let legacy = root.join("legacy");
         let output = root.join("output");
-        let encrypted = cryphase::encrypt("old text", b"a", Kdf::Pbkdf2).unwrap();
-        let path = notes::save(&legacy, "old", &encrypted, Kdf::Pbkdf2).unwrap();
+        // A real pre-policy, headerless PBKDF2 fixture, with its original short password.
+        let encrypted = "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKC9dXGW9MgtR/TgTT96LHt4EJwQCxqqBKwMSbHN+DLQrV1u7BLg==";
+        fs::create_dir_all(&legacy).unwrap();
+        let path = legacy.join("old.json");
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({"schema":"seedcrypt-note", "schema_version":1,"encoding":"base64","ciphertext":encrypted})).unwrap()).unwrap();
         let mut plan = prepare(&legacy, Mode::Decrypt).unwrap();
         assert!(
-            run(&plan, &output, b"a", false, |_, _, _| true)
+            run(&plan, &output, b"password", false, |_, _, _| true)
                 .error
                 .is_some()
         );
         plan.allow_legacy = true;
         assert_eq!(
-            run(&plan, &output, b"a", false, |_, _, _| true).succeeded,
+            run(&plan, &output, b"password", false, |_, _, _| true).succeeded,
             1
         );
         assert_eq!(
             fs::read(output.join("restored_0001.bin")).unwrap(),
-            b"old text"
+            b"legacy compatibility"
         );
         drop(plan);
         fs::remove_file(path).unwrap();
@@ -474,11 +519,23 @@ mod tests {
         fs::write(source.join("empty.txt"), []).unwrap();
         let plan = prepare(&source, Mode::Encrypt).unwrap();
         assert_eq!(plan.skipped, 1);
-        let result = run(&plan, &encrypted, b"password", true, |_, _, _| true);
+        let result = run(
+            &plan,
+            &encrypted,
+            b"test passphrase for batch",
+            true,
+            |_, _, _| true,
+        );
         assert_eq!((result.succeeded, result.failed), (2, 0));
         let first_ciphertext = notes::load(&encrypted, "note_0001").unwrap();
         assert_eq!(fs::read(source.join("a.bin")).unwrap(), [0, 255, 0, 1]);
-        let repeat = run(&plan, &encrypted, b"password", true, |_, _, _| true);
+        let repeat = run(
+            &plan,
+            &encrypted,
+            b"test passphrase for batch",
+            true,
+            |_, _, _| true,
+        );
         assert!(repeat.error.is_some());
         assert_eq!((repeat.succeeded, repeat.failed), (0, 0));
         assert_eq!(
@@ -491,7 +548,13 @@ mod tests {
         assert!(wrong.error.is_some());
         assert_eq!((wrong.succeeded, wrong.failed), (0, 0));
         assert!(!restored.exists());
-        let decoded = run(&decode, &restored, b"password", false, |_, _, _| true);
+        let decoded = run(
+            &decode,
+            &restored,
+            b"test passphrase for batch",
+            false,
+            |_, _, _| true,
+        );
         assert_eq!((decoded.succeeded, decoded.failed), (2, 0));
         assert_eq!(decoded.skipped, 1);
         assert!(decoded.verified);
@@ -500,7 +563,7 @@ mod tests {
         let cancelled = run(
             &plan,
             &root.join("cancelled"),
-            b"password",
+            b"test passphrase for batch",
             true,
             |_, _, _| false,
         );
@@ -511,7 +574,7 @@ mod tests {
             run(
                 &incomplete,
                 &root.join("incomplete-output"),
-                b"password",
+                b"test passphrase for batch",
                 false,
                 |_, _, _| true
             )
@@ -534,12 +597,26 @@ mod tests {
         let raw = root.join("raw");
         let raw_restored = root.join("raw-restored");
         assert_eq!(
-            run(&plan, &raw, b"password", false, |_, _, _| true).succeeded,
+            run(
+                &plan,
+                &raw,
+                b"test passphrase for batch",
+                false,
+                |_, _, _| true
+            )
+            .succeeded,
             2
         );
         let raw_plan = prepare(&raw, Mode::Decrypt).unwrap();
         assert_eq!(
-            run(&raw_plan, &raw_restored, b"password", false, |_, _, _| true).succeeded,
+            run(
+                &raw_plan,
+                &raw_restored,
+                b"test passphrase for batch",
+                false,
+                |_, _, _| true
+            )
+            .succeeded,
             2
         );
         assert_eq!(

@@ -99,9 +99,7 @@ fn encrypt_versioned(
     kdf: Kdf,
     version: u8,
 ) -> Result<String, String> {
-    if password.is_empty() {
-        return Err("[error] Password cannot be empty.".to_string());
-    }
+    crate::password::validate_new(password).map_err(|error| error.to_string())?;
     if plaintext.len() > crate::limits::MAX_CONTENT_BYTES {
         return Err("Content exceeds the supported size limit.".to_string());
     }
@@ -264,10 +262,15 @@ mod tests {
     fn both_kdfs_roundtrip_and_reject_tampering() {
         for kdf in [Kdf::Pbkdf2, Kdf::Argon2id] {
             for text in ["", "rahasia 🌱\nbaris dua"] {
-                let encrypted = encrypt(text, b"password", kdf).unwrap();
-                assert_eq!(decrypt(&encrypted, b"password").unwrap().as_str(), text);
+                let encrypted = encrypt(text, b"test passphrase for encryption", kdf).unwrap();
+                assert_eq!(
+                    decrypt(&encrypted, b"test passphrase for encryption")
+                        .unwrap()
+                        .as_str(),
+                    text
+                );
             }
-            let encrypted = encrypt("secret", b"password", kdf).unwrap();
+            let encrypted = encrypt("secret", b"test passphrase for encryption", kdf).unwrap();
             assert!(decrypt(&encrypted, b"wrong").is_err());
             let bytes = BASE64.decode(&encrypted).unwrap();
             for index in [
@@ -279,7 +282,9 @@ mod tests {
             ] {
                 let mut modified = bytes.clone();
                 modified[index] ^= 1;
-                assert!(decrypt(&BASE64.encode(modified), b"password").is_err());
+                assert!(
+                    decrypt(&BASE64.encode(modified), b"test passphrase for encryption").is_err()
+                );
             }
         }
     }
@@ -310,20 +315,35 @@ mod tests {
     #[test]
     fn oversized_content_rejected_before_key_derivation() {
         let bytes = vec![0; crate::limits::MAX_CONTENT_BYTES + 1];
-        assert!(encrypt_bytes(&bytes, b"password", Kdf::Argon2id).is_err());
+        assert!(
+            encrypt_bytes(&bytes, b"test passphrase for encryption", Kdf::Argon2id)
+                .unwrap_err()
+                .contains("size")
+        );
         let encoded = "A".repeat(crate::limits::MAX_BASE64_BYTES + 1);
         assert!(decrypt_authenticated(&encoded, b"password").is_err());
     }
 
     #[test]
+    fn encryption_boundaries_enforce_new_password_policy() {
+        for kdf in [Kdf::Pbkdf2, Kdf::Argon2id] {
+            assert!(encrypt("secret", b"a", kdf).is_err());
+            assert!(encrypt_bytes(b"secret", b"passwordpassword", kdf).is_err());
+            assert!(encrypt_file_container(b"secret", b"short", kdf).is_err());
+        }
+        assert!(encrypt_batch_member(b"secret", b"short", false).is_err());
+        assert!(encrypt_batch_manifest(b"secret", b"short").is_err());
+    }
+
+    #[test]
     fn malformed_and_randomized() {
         for input in ["", "!", "AAAA"] {
-            assert!(decrypt(input, b"password").is_err());
+            assert!(decrypt(input, b"test passphrase for encryption").is_err());
         }
         assert!(encrypt("secret", b"", Kdf::Argon2id).is_err());
         assert_ne!(
-            encrypt("same", b"password", Kdf::Argon2id).unwrap(),
-            encrypt("same", b"password", Kdf::Argon2id).unwrap()
+            encrypt("same", b"test passphrase for encryption", Kdf::Argon2id).unwrap(),
+            encrypt("same", b"test passphrase for encryption", Kdf::Argon2id).unwrap()
         );
     }
 }

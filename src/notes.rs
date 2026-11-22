@@ -202,13 +202,15 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("seedcrypt-size-{:x}", u128::from_le_bytes(random)));
         let bytes = vec![42; crate::limits::MAX_CONTENT_BYTES];
-        let ciphertext = crate::cryphase::encrypt_bytes(&bytes, b"password", Kdf::Pbkdf2).unwrap();
+        let ciphertext =
+            crate::cryphase::encrypt_bytes(&bytes, b"test passphrase for note size", Kdf::Pbkdf2)
+                .unwrap();
         assert!(ciphertext.len() <= crate::limits::MAX_BASE64_BYTES);
         let path = save(&directory, "maximum", &ciphertext, Kdf::Pbkdf2).unwrap();
         assert!(fs::metadata(&path).unwrap().len() <= crate::limits::MAX_JSON_BYTES as u64);
         let loaded = load(&directory, "maximum").unwrap();
         assert_eq!(
-            &*crate::cryphase::decrypt_bytes(&loaded, b"password").unwrap(),
+            &*crate::cryphase::decrypt_bytes(&loaded, b"test passphrase for note size").unwrap(),
             &bytes
         );
         let oversized = "A".repeat(crate::limits::MAX_BASE64_BYTES + 1);
@@ -300,14 +302,17 @@ mod tests {
         // Password rotation preserves the source and migrates a legacy note.
         let legacy = "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKC9dXGW9MgtR/TgTT96LHt4EJwQCxqqBKwMSbHN+DLQrV1u7BLg==";
         let old_plaintext = crate::cryphase::decrypt(legacy, b"password").unwrap();
-        let rotated =
-            crate::cryphase::encrypt(old_plaintext.as_str(), b"new password", Kdf::Argon2id)
-                .unwrap();
+        let rotated = crate::cryphase::encrypt(
+            old_plaintext.as_str(),
+            b"new passphrase for rotation",
+            Kdf::Argon2id,
+        )
+        .unwrap();
         drop(old_plaintext);
         let new_path = save(&directory, "rotated", &rotated, Kdf::Argon2id).unwrap();
         let new_ciphertext = load(&directory, "rotated").unwrap();
         assert_eq!(
-            crate::cryphase::decrypt(&new_ciphertext, b"new password")
+            crate::cryphase::decrypt(&new_ciphertext, b"new passphrase for rotation")
                 .unwrap()
                 .as_str(),
             "legacy compatibility"

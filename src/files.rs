@@ -149,38 +149,44 @@ mod tests {
         let file_bytes = b"\x00\xff\x01file contents";
         let packed = pack(file_bytes, "My document 01.pdf").unwrap();
         let encrypted =
-            cryphase::encrypt_file_container(&packed, b"old password", Kdf::Argon2id).unwrap();
+            cryphase::encrypt_file_container(&packed, b"old passphrase with cedar", Kdf::Argon2id)
+                .unwrap();
         assert!(
-            cryphase::decrypt_authenticated(&encrypted, b"old password")
+            cryphase::decrypt_authenticated(&encrypted, b"old passphrase with cedar")
                 .unwrap()
                 .kind
                 == cryphase::PayloadKind::NamedFile
         );
-        let plaintext = cryphase::decrypt_bytes(&encrypted, b"old password").unwrap();
+        let plaintext = cryphase::decrypt_bytes(&encrypted, b"old passphrase with cedar").unwrap();
         let (name, bytes) = unpack(&plaintext).unwrap();
         assert_eq!(name, "My document 01.pdf");
         assert_eq!(bytes, file_bytes);
         assert!(cryphase::decrypt_bytes(&encrypted, b"wrong").is_err());
-        let rotated =
-            cryphase::encrypt_file_container(&plaintext, b"new password", Kdf::Argon2id).unwrap();
-        let restored = cryphase::decrypt_bytes(&rotated, b"new password").unwrap();
+        let rotated = cryphase::encrypt_file_container(
+            &plaintext,
+            b"new passphrase with orbit",
+            Kdf::Argon2id,
+        )
+        .unwrap();
+        let restored = cryphase::decrypt_bytes(&rotated, b"new passphrase with orbit").unwrap();
         assert_eq!(unpack(&restored).unwrap(), (name, file_bytes.as_slice()));
-        assert!(cryphase::decrypt_bytes(&rotated, b"old password").is_err());
+        assert!(cryphase::decrypt_bytes(&rotated, b"old passphrase with cedar").is_err());
         let mut raw =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &encrypted).unwrap();
         raw[9] = 1;
         let tampered = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw);
-        assert!(cryphase::decrypt_bytes(&tampered, b"old password").is_err());
+        assert!(cryphase::decrypt_bytes(&tampered, b"old passphrase with cedar").is_err());
         // Arbitrary legacy bytes must never be mistaken for a new file container.
-        let legacy = cryphase::encrypt_bytes(&packed, b"password", Kdf::Argon2id).unwrap();
+        let legacy =
+            cryphase::encrypt_bytes(&packed, b"test passphrase for files", Kdf::Argon2id).unwrap();
         assert!(
-            cryphase::decrypt_authenticated(&legacy, b"password")
+            cryphase::decrypt_authenticated(&legacy, b"test passphrase for files")
                 .unwrap()
                 .kind
                 != cryphase::PayloadKind::NamedFile
         );
         assert_eq!(
-            &*cryphase::decrypt_bytes(&legacy, b"password").unwrap(),
+            &*cryphase::decrypt_bytes(&legacy, b"test passphrase for files").unwrap(),
             &*packed
         );
         for malformed in [
@@ -207,12 +213,14 @@ mod tests {
         let bytes: Vec<u8> = (0..=255).cycle().take(4096).collect();
         fs::write(&original, &bytes).unwrap();
         let source = read_source(&original).unwrap();
-        let encrypted = cryphase::encrypt_bytes(&source, b"password", Kdf::Argon2id).unwrap();
+        let encrypted =
+            cryphase::encrypt_bytes(&source, b"test passphrase for files", Kdf::Argon2id).unwrap();
         let note = crate::notes::save(&dir, "encrypted", &encrypted, Kdf::Argon2id).unwrap();
         let loaded = crate::notes::load_path(&note).unwrap();
         let named = pack(&bytes, "original.bin").unwrap();
         let named_encrypted =
-            cryphase::encrypt_file_container(&named, b"password", Kdf::Argon2id).unwrap();
+            cryphase::encrypt_file_container(&named, b"test passphrase for files", Kdf::Argon2id)
+                .unwrap();
         let named_path =
             crate::notes::save(&dir, "named", &named_encrypted, Kdf::Argon2id).unwrap();
         assert_eq!(
@@ -229,8 +237,8 @@ mod tests {
         );
         fs::remove_file(named_path).unwrap();
         assert!(cryphase::decrypt_bytes(&loaded, b"wrong").is_err());
-        assert!(cryphase::decrypt(&loaded, b"password").is_err());
-        let decrypted = cryphase::decrypt_bytes(&loaded, b"password").unwrap();
+        assert!(cryphase::decrypt(&loaded, b"test passphrase for files").is_err());
+        let decrypted = cryphase::decrypt_bytes(&loaded, b"test passphrase for files").unwrap();
         assert_eq!(&*decrypted, &bytes);
         let result = export(&dir, "restored.bin", &decrypted).unwrap();
         assert_eq!(fs::read(&result).unwrap(), bytes);
