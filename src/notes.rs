@@ -160,7 +160,7 @@ pub fn save(directory: &Path, name: &str, ciphertext: &str, kdf: Kdf) -> io::Res
     let bytes = BASE64.decode(ciphertext).map_err(io::Error::other)?;
     let id = kdf as u8;
     if !bytes.starts_with(b"SEEDCRYPT")
-        || !matches!(bytes.get(9), Some(1 | 2))
+        || !matches!(bytes.get(9), Some(1..=5))
         || bytes.get(10) != Some(&id)
         || bytes.len() < 55
         || BASE64.encode(&bytes) != ciphertext

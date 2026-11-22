@@ -196,17 +196,30 @@ where
             let spinner_chars = ['|', '/', '-', '\\'];
             let mut i = 0;
             while running_ref.load(Ordering::SeqCst) {
-                print!("\r{} {}", msg, spinner_chars[i]);
-                io::stdout().flush().unwrap();
+                let mut output = io::stdout();
+                if write!(output, "\r{} {}", msg, spinner_chars[i])
+                    .and_then(|()| output.flush())
+                    .is_err()
+                {
+                    break;
+                }
                 i = (i + 1) % 4;
                 thread::sleep(Duration::from_millis(100));
             }
-            print!("\r{} \r", " ".repeat(msg.len() + 2));
-            io::stdout().flush().unwrap();
+            let mut output = io::stdout();
+            let _ =
+                write!(output, "\r{} \r", " ".repeat(msg.len() + 2)).and_then(|()| output.flush());
         });
 
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let stop = StopOnDrop(&running);
         let result = task();
-        running.store(false, Ordering::SeqCst);
+        drop(stop);
         result
     })
 }
@@ -440,13 +453,11 @@ fn show_decrypted(decrypted: cryphase::SecretText) -> io::Result<()> {
 }
 
 fn confirmed_password() -> io::Result<Zeroizing<Vec<u8>>> {
+    println!(
+        "  Use a unique passphrase: 16+ characters, at least 5 distinct non-space characters."
+    );
     let password = password_prompt("  New password: ")?;
-    if password.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Password cannot be empty.",
-        ));
-    }
+    crate::password::validate_new(&password)?;
     let confirmation = password_prompt("  Confirm new password: ")?;
     let matches = password.as_slice() == confirmation.as_slice();
     drop(confirmation);
@@ -539,6 +550,17 @@ fn reencrypt_menu() {
             return;
         }
     };
+    if matches!(
+        plaintext.kind,
+        cryphase::PayloadKind::BatchRaw
+            | cryphase::PayloadKind::BatchNamed
+            | cryphase::PayloadKind::BatchManifest
+    ) {
+        println!(
+            "[error] Batch members are bound to their manifest. Recover the files, then encrypt them as a new batch to change its password."
+        );
+        return;
+    }
     let new_password = match confirmed_password() {
         Ok(password) => password,
         Err(error) => {
@@ -721,16 +743,20 @@ fn file_menu(encrypting: bool) {
                 return;
             }
         };
-        let (original_name, file_bytes) = if plaintext.kind == cryphase::PayloadKind::NamedFile {
-            match crate::files::unpack(&plaintext.bytes) {
-                Ok((name, bytes)) => (Some(name), bytes),
-                Err(error) => {
-                    println!("[error] {error}");
-                    return;
-                }
+        if matches!(
+            plaintext.kind,
+            cryphase::PayloadKind::BatchRaw | cryphase::PayloadKind::BatchNamed
+        ) {
+            println!(
+                "[info] Individual recovery authenticates this file only. Use menu 10 to verify batch completeness."
+            );
+        }
+        let (original_name, file_bytes) = match crate::files::restore_parts(&plaintext) {
+            Ok(parts) => parts,
+            Err(error) => {
+                println!("[error] {error}");
+                return;
             }
-        } else {
-            (None, plaintext.bytes.as_slice())
         };
         println!("[info] Export writes unencrypted data to decrypted_files/.");
         println!("  Type /cancel to cancel. Existing files are never overwritten.");
@@ -792,19 +818,29 @@ fn batch_menu(encrypting: bool) {
     } else {
         crate::batch::Mode::Decrypt
     };
-    let plan = match crate::batch::prepare(&source, mode) {
+    let mut plan = match crate::batch::prepare(&source, mode) {
         Ok(plan) => plan,
         Err(error) => {
             println!("[error] Could not read source folder: {error}");
             return;
         }
     };
-    if plan.files.is_empty() {
+    if plan.files.is_empty() && !plan.has_manifest {
         println!(
             "[info] No eligible files found. Skipped {} entries.",
             plan.skipped
         );
         return;
+    }
+    if !encrypting && !plan.has_manifest {
+        println!(
+            "[warning] This folder has no authenticated batch manifest. Completeness cannot be verified."
+        );
+        let consent = input_prompt("  Process legacy independent notes anyway? [y/N]: ");
+        if !matches!(consent.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            return;
+        }
+        plan.allow_legacy = true;
     }
     let mut random = [0; 8];
     if let Err(error) = getrandom::fill(&mut random) {
@@ -950,12 +986,27 @@ fn batch_menu(encrypting: bool) {
     );
     drop(terminal);
     drop(password);
-    let remaining = plan.files.len() - summary.succeeded - summary.failed;
+    let remaining = summary
+        .total
+        .saturating_sub(summary.succeeded + summary.failed);
     println!("\n  BATCH SUMMARY\n  ----------------------------------------");
     println!(
         "  Succeeded: {} | Failed: {} | Skipped entries: {} | Not processed: {}",
         summary.succeeded, summary.failed, summary.skipped, remaining
     );
+    if let Some(error) = &summary.error {
+        println!("[error] {error}");
+    }
+    if summary.verified {
+        println!("[ok] Authenticated batch manifest verified before export.");
+    }
+    if encrypting && summary.error.is_none() {
+        if summary.failed == 0 && !summary.cancelled {
+            println!("[ok] Complete encrypted batch manifest committed.");
+        } else {
+            println!("[warning] Incomplete batch recorded. Use menu 8 for individual recovery.");
+        }
+    }
     if summary.cancelled {
         println!("[info] Batch stopped. Completed outputs are retained.");
     }
@@ -965,6 +1016,14 @@ fn batch_menu(encrypting: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loading_worker_stops_when_the_task_unwinds() {
+        let result = std::panic::catch_unwind(|| {
+            run_with_loading("Test", || panic!("injected task failure"))
+        });
+        assert!(result.is_err());
+    }
 
     #[test]
     fn multiline_limit_includes_separator_and_does_not_append_partial_input() {

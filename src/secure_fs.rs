@@ -87,17 +87,132 @@ pub fn open_read(path: &Path) -> io::Result<SecureFile> {
     open(path, false)
 }
 
-pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut output = open(path, true)?;
-    if let Err(error) = output
-        .file
-        .write_all(bytes)
-        .and_then(|()| output.file.sync_all())
-    {
-        output.discard();
-        return Err(error);
+struct PendingFile {
+    file: SecureFile,
+    cleanup: bool,
+}
+
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        if self.cleanup {
+            self.file.discard();
+        }
     }
+}
+
+pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_new_with(path, |file| file.write_all(bytes))
+}
+
+fn write_new_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    let path = absolute(path)?;
+    let _name = path.file_name().ok_or_else(invalid_path)?;
+    let parent = path.parent().ok_or_else(invalid_path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        if _name.encode_wide().any(|c| c == b':' as u16 || c == 0) {
+            return Err(invalid_path());
+        }
+    }
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(io::Error::other)?;
+    let temporary = parent.join(format!(
+        ".seedcrypt-{:032x}.tmp",
+        u128::from_le_bytes(random)
+    ));
+    let mut pending = PendingFile {
+        file: open(&temporary, true)?,
+        cleanup: true,
+    };
+    write(&mut pending.file.file)?;
+    pending.file.file.sync_all()?;
+    publish(&mut pending, &path)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
+    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+    let wide: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = offset + (wide.len() + 1) * 2;
+    // u64 storage gives the structure its required alignment and room for the variable name.
+    let mut storage = vec![0u64; size.div_ceil(8)];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: aligned zeroed buffer, sized for the full UTF-16 name; parent and file handles stay live.
+    let success = unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = (wide.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
+            wide.len(),
+        );
+        SetFileInformationByHandle(
+            pending.file.file.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            size as u32,
+        )
+    };
+    if success == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // The handle now names the final file. Never delete it if the subsequent flush fails.
+    pending.cleanup = false;
+    pending.file.file.sync_all().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Output committed, but its final flush failed: {error}"),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn publish(pending: &mut PendingFile, destination: &Path) -> io::Result<()> {
+    use std::{
+        ffi::CString,
+        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    };
+    let destination = CString::new(destination.file_name().ok_or_else(invalid_path)?.as_bytes())
+        .map_err(|_| invalid_path())?;
+    let parent = pending.file._parents.last().unwrap();
+    // SAFETY: both are single basenames relative to the same pinned directory.
+    // linkat fails with EEXIST, so publication is atomic without overwriting any target.
+    if unsafe {
+        libc::linkat(
+            parent.as_raw_fd(),
+            pending.file.name.as_ptr(),
+            parent.as_raw_fd(),
+            destination.as_ptr(),
+            0,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    parent.sync_all().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Output committed, but directory synchronization failed: {error}"),
+        )
+    })?;
+    pending.file.discard();
+    pending.cleanup = false;
+    parent.sync_all()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish(_pending: &mut PendingFile, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Atomic publication is unavailable on this platform.",
+    ))
 }
 
 #[cfg(windows)]
@@ -260,6 +375,7 @@ fn open_impl(path: &Path, create: bool, directory: bool) -> io::Result<SecureFil
                     return Err(error);
                 }
             }
+            parents.last().unwrap().sync_all()?;
             directory = owned(unsafe { libc::openat(parent, part.as_ptr(), flags) });
         }
         parents.push(directory?);
@@ -319,6 +435,64 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn atomic_writer_cleans_partial_writes_and_unwinds_without_publishing() {
+        let root = directory();
+        let final_path = root.join("atomic.bin");
+        let failed = write_new_with(&final_path, |file| {
+            file.write_all(b"partial secret")?;
+            assert!(!final_path.exists());
+            Err(io::Error::other("injected disk failure"))
+        });
+        assert!(failed.is_err());
+        assert!(!final_path.exists());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        let panic = std::panic::catch_unwind(|| {
+            let _ = write_new_with(&final_path, |file| {
+                file.write_all(b"partial secret")?;
+                panic!("injected writer panic");
+            });
+        });
+        assert!(panic.is_err());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        write_new(&final_path, b"complete").unwrap();
+        assert!(write_new(&final_path, b"overwrite").is_err());
+        assert_eq!(fs::read(&final_path).unwrap(), b"complete");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_file(final_path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publication_has_one_winner_and_no_partial_final_file() {
+        let root = directory();
+        let path = root.join("race.bin");
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                write_new_with(&path, |file| {
+                    file.write_all(b"AAAA")?;
+                    barrier.wait();
+                    Ok(())
+                })
+            });
+            let b = scope.spawn(|| {
+                write_new_with(&path, |file| {
+                    file.write_all(b"BBBB")?;
+                    barrier.wait();
+                    Ok(())
+                })
+            });
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes == b"AAAA" || bytes == b"BBBB");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]

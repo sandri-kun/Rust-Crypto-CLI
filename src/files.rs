@@ -40,9 +40,11 @@ pub fn validate_name(name: &str) -> io::Result<()> {
         || name.ends_with('.')
         || name.ends_with(' ')
         || name.chars().any(|c| {
-            c.is_control() || matches!(c, '/' | '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*')
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '"' | '<' | '>' | '|' | '?' | '*'
+                | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
         })
         || matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(base.as_str(), "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³" | "CONIN$" | "CONOUT$")
         || (base.len() == 4
             && (base.starts_with("COM") || base.starts_with("LPT"))
             && matches!(base.as_bytes()[3], b'1'..=b'9'))
@@ -93,11 +95,54 @@ pub fn export(directory: &Path, name: &str, plaintext: &[u8]) -> io::Result<Path
     Ok(path)
 }
 
+pub fn restore_parts(
+    payload: &crate::cryphase::DecryptedPayload,
+) -> io::Result<(Option<&str>, &[u8])> {
+    use crate::cryphase::PayloadKind;
+    let bytes = if matches!(
+        payload.kind,
+        PayloadKind::BatchRaw | PayloadKind::BatchNamed
+    ) {
+        payload
+            .bytes
+            .get(20..)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid batch binding."))?
+    } else {
+        &payload.bytes
+    };
+    match payload.kind {
+        PayloadKind::NamedFile | PayloadKind::BatchNamed => {
+            unpack(bytes).map(|(name, bytes)| (Some(name), bytes))
+        }
+        PayloadKind::Raw | PayloadKind::Legacy | PayloadKind::BatchRaw => Ok((None, bytes)),
+        PayloadKind::BatchManifest => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "This is a batch manifest. Select the batch folder in menu 10.",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cryphase::{self, Kdf};
     use std::fs;
+
+    #[test]
+    fn reject_spoofing_controls_and_all_windows_reserved_device_numbers() {
+        for name in [
+            "invoice\u{202e}fdp.exe",
+            "a\u{200b}.txt",
+            "COM¹.txt",
+            "LPT².txt",
+            "COM³",
+            "CONIN$",
+            "CONOUT$",
+        ] {
+            assert!(validate_name(name).is_err());
+        }
+        assert!(validate_name("My document 01.pdf").is_ok());
+    }
 
     #[test]
     fn encrypted_filename_roundtrip_and_password_rotation() {

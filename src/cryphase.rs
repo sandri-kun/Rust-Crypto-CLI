@@ -69,11 +69,22 @@ pub fn encrypt_file_container(
     encrypt_versioned(plaintext, password, kdf, 2)
 }
 
+pub fn encrypt_batch_member(bytes: &[u8], password: &[u8], named: bool) -> Result<String, String> {
+    encrypt_versioned(bytes, password, Kdf::Argon2id, if named { 4 } else { 3 })
+}
+
+pub fn encrypt_batch_manifest(bytes: &[u8], password: &[u8]) -> Result<String, String> {
+    encrypt_versioned(bytes, password, Kdf::Argon2id, 5)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PayloadKind {
     Legacy,
     Raw,
     NamedFile,
+    BatchRaw,
+    BatchNamed,
+    BatchManifest,
 }
 
 /// Metadata is assigned only after successful authentication of the matching format.
@@ -140,7 +151,7 @@ fn decrypt_payload(
 
 pub fn decrypt(encrypted_base64: &str, password: &[u8]) -> Result<SecretText, String> {
     let plaintext = decrypt_authenticated(encrypted_base64, password)?;
-    if plaintext.kind == PayloadKind::NamedFile {
+    if !matches!(plaintext.kind, PayloadKind::Raw | PayloadKind::Legacy) {
         return Err("This note contains a file. Use menu 8 to restore it.".to_string());
     }
     SecretText::from_bytes(plaintext.bytes)
@@ -167,8 +178,8 @@ pub fn decrypt_authenticated(
     let header_len = MAGIC.len() + 2;
     if payload.starts_with(MAGIC) && payload.len() >= header_len {
         let kdf = match (payload[MAGIC.len()], payload[MAGIC.len() + 1]) {
-            (1 | 2, 1) => Some(Kdf::Pbkdf2),
-            (1 | 2, 2) => Some(Kdf::Argon2id),
+            (1..=5, 1) => Some(Kdf::Pbkdf2),
+            (1..=5, 2) => Some(Kdf::Argon2id),
             _ => None,
         };
         if let Some(kdf) = kdf
@@ -181,10 +192,12 @@ pub fn decrypt_authenticated(
         {
             return Ok(DecryptedPayload {
                 bytes: text,
-                kind: if payload[MAGIC.len()] == 2 {
-                    PayloadKind::NamedFile
-                } else {
-                    PayloadKind::Raw
+                kind: match payload[MAGIC.len()] {
+                    2 => PayloadKind::NamedFile,
+                    3 => PayloadKind::BatchRaw,
+                    4 => PayloadKind::BatchNamed,
+                    5 => PayloadKind::BatchManifest,
+                    _ => PayloadKind::Raw,
                 },
             });
         }

@@ -13,7 +13,7 @@ cargo build --release
 cargo run --release
 ```
 
-An interactive terminal is required for all prompts; redirected input and output are rejected. Password entry displays `*` characters, supports Backspace, and accepts Enter to submit. Esc or Ctrl+C cancels masked input.
+An interactive terminal is required for all prompts; redirected input and output are rejected. New passwords require at least 16 characters and five distinct non-space characters; common and short repeated patterns are rejected. Use a unique randomly generated passphrase. This policy does not apply to passwords used for decrypting existing data. Password entry displays `*` characters, supports Backspace, and accepts Enter to submit. Esc or Ctrl+C cancels masked input.
 
 Folders are relative to the directory from which you launch the application:
 
@@ -111,7 +111,7 @@ Output filenames accept spaces and Unicode, up to 240 UTF-8 bytes. Paths, contro
 3. Enter and confirm the new password.
 4. Save the result under a new filename.
 
-The new ciphertext uses Argon2id with fresh salt and nonce. Plaintext is neither displayed nor written to disk during re-encryption. Text, raw binary files, and named file containers are supported; stored filename metadata is preserved.
+The new ciphertext uses Argon2id with fresh salt and nonce. Plaintext is neither displayed nor written to disk during re-encryption. Text, raw binary files, and standalone named file containers are supported; stored filename metadata is preserved. New manifest-bound batch members cannot be individually re-encrypted by menu 6: recover their contents and create a new batch instead.
 
 The original note is retained and still accepts the original password. Re-encrypting does not revoke access to old copies. Cancelling before saving discards the newly generated ciphertext.
 
@@ -123,19 +123,23 @@ Paths containing spaces and paths wrapped in matching single or double quotes ar
 
 ### Batch encrypt and decrypt
 
-Choose `9` to encrypt all regular files directly inside one source folder, or `10` to decrypt its `.json` files. Subfolders, links, and non-JSON files in decrypt mode are skipped. A batch supports up to 1,000 eligible files; each encrypted source file still has the 8 MiB input limit.
+Choose `9` to encrypt one folder without subfolders, or `10` to decrypt an encrypted batch folder. Up to 1,000 regular files are supported, with the existing 8 MiB source-file limit. Links, subfolders, and application staging files are skipped; decrypt mode considers `.json` files only.
 
 1. Type, paste, or drop the source folder path.
-2. Accept the proposed fresh output folder or enter another output folder. Defaults are `secret_notes/batch_<random-id>/` for encryption and `decrypted_files/batch_<random-id>/` for decryption.
-3. For encryption, choose whether to remember original filenames inside encryption (default: yes).
+2. Accept the proposed output folder or enter another trusted private folder. Encryption requires a **new or empty** folder. Defaults are `secret_notes/batch_<random-id>/` and `decrypted_files/batch_<random-id>/`.
+3. For encryption, choose whether to store original filenames inside encryption (default: yes).
 4. Review the file list and output folder, then enter `y` to proceed.
-5. Enter one password for the batch; encryption asks for confirmation.
+5. Enter one password; new encryption passwords require confirmation and must meet the password policy.
 
-Processing is sequential, so only one file's content and Argon2 working memory are needed at a time. Each file gets fresh random salt and nonce and is encrypted independently using Argon2id and AES-256-GCM. Output JSON filenames are opaque (`note_0001.json`, etc.). If original names are stored, menu 10 restores them; older or unnamed files are exported as `restored_0001.bin`, etc. These fallback names do not preserve extensions.
+Each member is independently encrypted with Argon2id, fresh salt and nonce, and an authenticated binding to a random batch ID and file index. Output names are `note_0001.json`, etc. An encrypted `batch_manifest.json` records the expected count, opaque filenames, ciphertext SHA-256 hashes, and whether the batch completed.
 
-Existing output files are never overwritten. Duplicate restored names, wrong passwords, invalid notes, unsafe filenames, oversized files, and read/write errors fail that file while the batch continues. Files encrypted with different passwords must be retried separately with the appropriate password. The final summary reports successes, failures, skipped entries, and files not processed. Batch decrypt writes **unencrypted** data to the selected output folder, so choose a trusted private folder.
+Batch decrypt authenticates the manifest and verifies all expected member hashes **before exporting any file**. Missing, replaced or modified members and invalid/incomplete manifests halt verification. File identity and hashes are checked again during processing. Additional unlisted JSON files are ignored and counted as skipped. Whole-batch rollback to an older valid manifest and its matching files is not detected without an external trusted record.
 
-Press Esc or Ctrl+C during processing to stop after the current file completes. Completed outputs remain; unprocessed files are left alone. Folder contents are listed before output is written, so newly generated files do not get added to the current batch. The source files are never modified or deleted. Folder scanning is nonrecursive: use menu 10 on the specific generated batch subfolder rather than its parent `secret_notes/` folder.
+Folders from older versions have no manifest. They require explicit consent to process without completeness guarantees; new bound members still cannot be downgraded to legacy mode. Wrong manifest passwords stop verification before output. After successful verification, per-file read, identity, filename or write failures are reported individually and processing continues. A new encrypt batch that has failures or is cancelled is recorded as incomplete, rather than represented as a complete backup.
+
+Press Esc or Ctrl+C to stop after the current file. Completed outputs remain. If a crash prevents the manifest being committed, menu 8 can recover individual authenticated members, with a warning that collection completeness is not checked. Store the manifest alongside all members. An incomplete batch can also be recovered individually; do not delete its source files based on a partial-success summary.
+
+Original names are restored when stored; otherwise safe fallback names such as `restored_0001.bin` are used. Batch decrypt writes **unencrypted** data to the output folder. No existing files are overwritten. Folder scanning is nonrecursive, so select the specific batch subfolder in menu 10. Processing is sequential, and source files are not modified or deleted.
 
 ## Cryptography and memory handling
 
@@ -180,7 +184,7 @@ A saved note contains ciphertext and descriptive format metadata:
 }
 ```
 
-The example uses a placeholder, not valid ciphertext. Named files use `payload_version: 2`. JSON never intentionally stores plaintext, passwords, plaintext previews, or password verification hashes. Filenames you choose for JSON notes are visible on disk; avoid sensitive names.
+The example uses a placeholder, not valid ciphertext. Standalone named files use `payload_version: 2`; manifest-bound members use versions 3 or 4 and manifests use version 5. JSON never intentionally stores plaintext, passwords, plaintext previews, or password verification hashes. Filenames you choose for JSON notes are visible on disk; avoid sensitive names.
 
 External JSON metadata is descriptive and is not authenticated. The reader validates the schema, schema version, encoding, and ciphertext structure; algorithm selection comes from the authenticated payload header rather than the external `kdf` fields.
 
@@ -200,11 +204,14 @@ The magic, version, and KDF ID are authenticated as AES-GCM additional data.
 | Field | Values |
 | --- | --- |
 | Payload version `0x01` | Raw content: UTF-8 text or arbitrary file bytes |
-| Payload version `0x02` | File container with an encrypted original filename |
+| Payload version `0x02` | Standalone file container with an encrypted original filename |
+| Payload version `0x03` | Batch-bound raw content |
+| Payload version `0x04` | Batch-bound named file content |
+| Payload version `0x05` | Encrypted batch manifest |
 | KDF ID `0x01` | PBKDF2-HMAC-SHA256 |
 | KDF ID `0x02` | Argon2id |
 
-Version 2 encrypts `filename_length_u16_le | UTF-8 basename | original file bytes`. Versions 1 and 2 use the KDF parameters listed above. Future parameter changes must not silently reinterpret these versions.
+Version 2 encrypts `filename_length_u16_le | UTF-8 basename | original file bytes`. Versions 3 and 4 prepend `batch_id (16 bytes) | index_u32_le` to raw or named-file content. Version 5 encrypts a JSON manifest. Versions 1 through 5 use the KDF parameters listed above. Future parameter changes must not silently reinterpret these versions.
 
 Decryption also accepts the original headerless PBKDF2 format:
 
@@ -235,10 +242,13 @@ Password masking, visible multiline input, legacy decryption, result-screen dism
 | `src/notes.rs` | JSON note storage, validation, and file-path handling |
 | `src/files.rs` | Binary input, encrypted filename containers, and plaintext export |
 | `src/limits.rs` | Shared input, ciphertext, and JSON size limits |
-| `src/secure_fs.rs` | Handle-based file access and link/reparse-point rejection |
+| `src/secure_fs.rs` | Handle-based access, atomic no-overwrite output and link/reparse rejection |
+| `src/password.rs` | New-password policy, separate from legacy decryption |
 
 
 ### Filesystem hardening
+
+Output is staged, flushed and atomically published without overwriting. Recoverable errors and panics before publication trigger staging cleanup; Unix directory entries are synchronized. Filesystem or hardware failures can still prevent durable recovery. See [SECURITY.md](SECURITY.md) for exact guarantees and limits.
 
 On Windows, the application opens each ancestor with reparse-point processing disabled, checks its metadata through the handle, and holds handles that deny write/delete sharing while resolving and accessing the child. File handles also prevent concurrent replacement. On Unix, it walks directories using `openat` with `O_DIRECTORY` and `O_NOFOLLOW`, then opens the final basename relative to the pinned parent descriptor. New output files use exclusive creation. Incomplete writes trigger best-effort removal through the file handle on Windows or pinned parent on Unix.
 
@@ -266,3 +276,8 @@ On Unix, run:
 ```
 
 The security remediation run checked 78 locked dependencies against the RustSec database updated on 2026-11-21 and reported no known vulnerabilities or warnings. This is a point-in-time result, not a permanent guarantee; refresh the database and repeat the check when dependencies change.
+
+
+## Security checks before release
+
+See [SECURITY.md](SECURITY.md) for the threat model, batch integrity rules, panic/cleanup behavior and remaining release-owner responsibilities. The release profile uses unwinding so ordinary panics run cleanup guards. `.github/workflows/security.yml` runs release tests and builds on Windows and Linux, plus advisory checks. The workflow has read-only repository permissions and pins its checkout action. It does not publish artifacts, sign binaries or prove resistance to real power loss.
